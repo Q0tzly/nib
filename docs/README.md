@@ -6,7 +6,7 @@
 |----------|------|
 | [vision.md](vision.md) | 目的と目的外。既存エディタに対して何を変えるか |
 | [architecture.md](architecture.md) | コアとプラグインの境界、データモデル、描画、プロセスモデル |
-| plugin-api.md | WIT の設計方針、イベントとコマンドの流れ、ライフサイクル、権限 |
+| [plugin-api.md](plugin-api.md) | WIT の設計方針、イベントとコマンドの流れ、ライフサイクル、権限 |
 | keymap.md | モーダルの扱い、キーマップをプラグインで実現するしくみ |
 | roadmap.md | マイルストーン |
 | adr/ | 個別の設計判断の記録（`NNNN-title.md`） |

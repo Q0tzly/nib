@@ -15,10 +15,12 @@ A modal text editor where everything — including the default keymap — is a W
 
 ```
 core/      editor core (buffers, selections, rendering, plugin host)
+tui/       terminal frontend, builds the `nib` binary
 api/       plugin API definitions (WIT) — the single source of truth
 sdk/       plugin SDKs per language
 plugins/   standard plugins
 docs/      design documents
+bench/     latency benchmark against other editors
 ```
 
 ## License

@@ -122,6 +122,9 @@ interface editor {
         next-grapheme: func(pos: offset) -> offset;
         prev-grapheme: func(pos: offset) -> offset;
         path: func() -> option<string>;
+        /// 正規表現で検索する。見つかった範囲を返す
+        find: func(pattern: string, start: offset, backward: bool) -> result<option<tuple<offset, offset>>, string>;
+        find-all: func(pattern: string, start: offset, end: offset) -> result<list<tuple<offset, offset>>, string>;
     }
 
     variant scroll-amount { lines(s32), half-page(s32), page(s32) }
@@ -156,6 +159,7 @@ interface editor {
   - `merge` は直前の 1 手にまとめる。
   - 挿入モードでは、最初の打鍵を `new-step`、以降を `merge` にすれば、挿入全体が 1 手になる。
 - 書記素の境界は、コアが `next-grapheme` / `prev-grapheme` として提供する。プラグインごとに Unicode の表を持たなくて済み、描画とも結果が食い違わない。
+- 正規表現の検索は、コアが `find` / `find-all` として提供する。プラグインが自前で検索すると、大きなバッファの全文を毎回コピーすることになるため。
 - 縦移動（`j` / `k`）、スクロール、表示範囲は、画面の配置を知っているコアが計算する。プラグインは画面の行と列を知らないまま、これらの操作を書ける。
 
 ## コマンド
@@ -249,7 +253,7 @@ Helix 風キーマップで nib 自身を編集するのに必要なものだけ
 
 | 範囲 | M1 |
 |------|----|
-| `editor`（バッファ、選択、`apply`、undo、縦移動、スクロール、カーソルの形） | ○ |
+| `editor`（バッファ、選択、`apply`、undo、検索、縦移動、スクロール、カーソルの形） | ○ |
 | `input`（入力スタック） | ○ |
 | `commands`（登録と呼び出し、`buffer.open` / `buffer.save` / `editor.quit`） | ○ |
 | `ui.set-status`、`ui.open-panel` | ○ |

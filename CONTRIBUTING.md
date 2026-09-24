@@ -20,6 +20,9 @@ Unless you explicitly state otherwise, any contribution intentionally submitted 
 
 Some code may be adapted from [Helix](https://github.com/helix-editor/helix), which is licensed under MPL-2.0. MPL-2.0 is file-level copyleft, so:
 
+- Prefer reading Helix to understand an approach and then writing it yourself. Copy or port code only when it is clearly worth it.
 - Files containing code adapted from Helix stay under MPL-2.0. Keep the original copyright notice and add an MPL-2.0 header to the file.
+- Put adapted code in its own files. Pasting MPL code into an existing MIT OR Apache-2.0 file makes that file MPL-2.0 too.
 - List every such file in [THIRD_PARTY.md](THIRD_PARTY.md) with the upstream path and commit it came from.
+- Update the `license` field of the crate that contains the file to `(MIT OR Apache-2.0) AND MPL-2.0`.
 - Do not mix MPL-2.0 code into the plugin SDKs (`sdk/`) or the API definitions (`api/`). These must stay MIT OR Apache-2.0 so plugin authors are not constrained.

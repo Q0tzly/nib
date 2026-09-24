@@ -6,3 +6,9 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+
+[dependencies]
+# Line endings are normalized to LF on load, so only LF counts as a line break.
+ropey = { version = "1.6", default-features = false, features = ["simd"] }
+regex-cursor = "0.1"
+unicode-segmentation = "1.13"

@@ -12,3 +12,4 @@ repository.workspace = true
 ropey = { version = "1.6", default-features = false, features = ["simd"] }
 regex-cursor = "0.1"
 unicode-segmentation = "1.13"
+unicode-width = "0.2"

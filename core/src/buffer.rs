@@ -78,8 +78,29 @@ impl Buffer {
         Ok(buffer)
     }
 
+    /// Writes a temporary file next to the target and renames it over the
+    /// target, so a crash while saving never leaves a truncated file.
     pub fn save(&mut self) -> Result<(), Error> {
         let path = self.path.as_ref().ok_or(Error::NoPath)?;
+        // Write to the file a symlink points to, instead of replacing the link.
+        let target = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+        let name = target.file_name().unwrap_or_default().to_string_lossy();
+        let tmp = target.with_file_name(format!(".{name}.nib-{}~", std::process::id()));
+        let result = self.write_file(&tmp).and_then(|()| {
+            if let Ok(metadata) = fs::metadata(&target) {
+                fs::set_permissions(&tmp, metadata.permissions())?;
+            }
+            fs::rename(&tmp, &target)
+        });
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        result?;
+        self.saved_state = self.history.state();
+        Ok(())
+    }
+
+    fn write_file(&self, path: &Path) -> io::Result<()> {
         let mut out = BufWriter::new(File::create(path)?);
         match self.line_ending {
             LineEnding::Lf => self.text.write_to(&mut out)?,
@@ -89,9 +110,9 @@ impl Buffer {
                 }
             }
         }
-        out.flush()?;
-        self.saved_state = self.history.state();
-        Ok(())
+        out.into_inner()
+            .map_err(io::IntoInnerError::into_error)?
+            .sync_all()
     }
 
     pub fn save_as(&mut self, path: impl Into<PathBuf>) -> Result<(), Error> {
@@ -395,6 +416,48 @@ mod tests {
         assert!(buffer.is_modified());
         buffer.redo().unwrap();
         assert!(!buffer.is_modified());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_keeps_permissions_and_leaves_no_temp_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let file = TempFile::new("perm.sh", b"echo hi\n");
+        fs::set_permissions(&file.0, fs::Permissions::from_mode(0o750)).unwrap();
+        let mut buffer = Buffer::open(&file.0).unwrap();
+        insert(&mut buffer, 0, "#!/bin/sh\n", UndoMode::NewStep);
+        buffer.save().unwrap();
+
+        let metadata = fs::metadata(&file.0).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o750);
+        assert_eq!(fs::read(&file.0).unwrap(), b"#!/bin/sh\necho hi\n");
+        let name = file.0.file_name().unwrap().to_string_lossy().into_owned();
+        let leftovers = fs::read_dir(file.0.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                let entry = entry.file_name().to_string_lossy().into_owned();
+                entry.contains(&name) && entry.ends_with('~')
+            })
+            .count();
+        assert_eq!(leftovers, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_writes_through_symlinks() {
+        let target = TempFile::new("target.txt", b"a");
+        let link =
+            TempFile(std::env::temp_dir().join(format!("nib-{}-link.txt", std::process::id())));
+        std::os::unix::fs::symlink(&target.0, &link.0).unwrap();
+
+        let mut buffer = Buffer::open(&link.0).unwrap();
+        insert(&mut buffer, 1, "b", UndoMode::NewStep);
+        buffer.save().unwrap();
+
+        assert!(fs::symlink_metadata(&link.0).unwrap().is_symlink());
+        assert_eq!(fs::read(&target.0).unwrap(), b"ab");
     }
 
     #[test]

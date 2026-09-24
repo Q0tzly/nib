@@ -37,3 +37,5 @@ CI も同じ内容（test は Linux / macOS / Windows）。
 ## 進め方
 
 設計ドキュメント（`docs/`）を先に書き、それに沿って実装する。実装中に設計が変わったら、同じコミットで docs も更新する。
+
+`docs/` は日本語で書く。README・CONTRIBUTING・コード内のコメントと識別子は英語。

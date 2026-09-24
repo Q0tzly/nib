@@ -8,6 +8,7 @@ use crate::Error;
 use crate::change::{ChangeSet, Edit};
 use crate::grapheme;
 use crate::history::{History, UndoMode};
+use crate::search;
 use crate::selection::{Range, Selection};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,6 +159,26 @@ impl Buffer {
     pub fn prev_grapheme(&self, pos: usize) -> Result<usize, Error> {
         grapheme::check_position(&self.text, pos)?;
         Ok(grapheme::prev_boundary(&self.text, pos))
+    }
+
+    /// See [`search::find`].
+    pub fn find(
+        &self,
+        pattern: &str,
+        start: usize,
+        backward: bool,
+    ) -> Result<Option<(usize, usize)>, Error> {
+        search::find(&self.text, pattern, start, backward)
+    }
+
+    /// See [`search::find_all`].
+    pub fn find_all(
+        &self,
+        pattern: &str,
+        start: usize,
+        end: usize,
+    ) -> Result<Vec<(usize, usize)>, Error> {
+        search::find_all(&self.text, pattern, start, end)
     }
 
     /// Applies `edits` atomically: on error, nothing changes.

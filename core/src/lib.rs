@@ -5,6 +5,7 @@ pub mod change;
 mod error;
 pub mod grapheme;
 mod history;
+pub mod search;
 pub mod selection;
 
 pub use buffer::{Buffer, Change, LineEnding};

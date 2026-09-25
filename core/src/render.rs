@@ -4,10 +4,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::editor::{Editor, Menu};
 use crate::grid::{Cursor, CursorShape, Grid, Style, display_width};
-use crate::ui::{Side, Span, StyledLine, theme_style};
-
-const MAIN_MENU: &str =
-    "[r] restart plugins  [w] save all and quit  [q] quit  [any other key] back";
+use crate::ui::{Panel, Side, Span, StyledLine, theme_style};
 
 impl Editor {
     /// Draws the editor into `grid`, resizing it to the editor size.
@@ -36,9 +33,50 @@ impl Editor {
         let (_, height) = self.size();
         let status = u16::from(height > 1);
         let panels: usize = self.state().panels.iter().map(|p| p.lines.len()).sum();
+        let panels = panels + self.menu_lines().len();
         height
             .saturating_sub(status)
             .saturating_sub(panels.min(u16::MAX as usize) as u16)
+    }
+
+    /// The plugin list shown while the core menu is open, below any panels.
+    fn menu_lines(&self) -> Vec<StyledLine> {
+        let selected = match self.menu() {
+            Some(Menu::Main) => None,
+            Some(Menu::Plugin(id)) => Some(id),
+            Some(Menu::ConfirmQuit) | None => return Vec::new(),
+        };
+        let plugins = self.plugins();
+        if plugins.is_empty() {
+            return vec![vec![plain(" no plugins are loaded")]];
+        }
+        plugins
+            .iter()
+            .enumerate()
+            .map(|(id, plugin)| {
+                let state = match (&plugin.last_error, plugin.enabled) {
+                    (_, true) => "running".to_string(),
+                    (Some(err), false) => format!("disabled: {err}"),
+                    (None, false) => "disabled".to_string(),
+                };
+                let text = format!(
+                    " {}  {:<12} {:<8} slow calls: {:<4} {state}",
+                    id + 1,
+                    plugin.name,
+                    plugin.version,
+                    plugin.slow_calls,
+                );
+                let style = if selected == Some(id) {
+                    "ui.menu.selected"
+                } else {
+                    ""
+                };
+                vec![Span {
+                    text,
+                    style: style.into(),
+                }]
+            })
+            .collect()
     }
 
     /// Draws panels from row `top` down to `end`, oldest first. Returns the
@@ -46,7 +84,14 @@ impl Editor {
     fn render_panels(&self, grid: &mut Grid, top: u16, end: u16) -> Option<Cursor> {
         let mut cursor = None;
         let mut y = top;
-        for panel in &self.state().panels {
+        let menu = self.menu_lines();
+        let menu_panel = Panel {
+            id: 0,
+            owner: 0,
+            lines: menu,
+            cursor: None,
+        };
+        for panel in self.state().panels.iter().chain([&menu_panel]) {
             for (i, line) in panel.lines.iter().enumerate() {
                 if y >= end {
                     return cursor;
@@ -127,7 +172,30 @@ impl Editor {
         grid.fill_row(0, y, style);
         match self.menu() {
             Some(Menu::Main) => {
-                grid.put_str(1, y, MAIN_MENU, style);
+                let choose = if self.plugins().is_empty() {
+                    ""
+                } else {
+                    "[1-9] choose a plugin  "
+                };
+                let keys = format!(
+                    "{choose}[r] restart all  [w] save all and quit  [q] quit  [any other key] back"
+                );
+                grid.put_str(1, y, &keys, style);
+                return;
+            }
+            Some(Menu::Plugin(id)) => {
+                let plugin = &self.plugins()[id];
+                let toggle = if plugin.enabled { "disable" } else { "enable" };
+                let reload = if plugin.reloadable {
+                    "  [l] reload from disk"
+                } else {
+                    ""
+                };
+                let keys = format!(
+                    "{}: [r] restart  [d] {toggle}{reload}  [any other key] back",
+                    plugin.name
+                );
+                grid.put_str(1, y, &keys, style);
                 return;
             }
             Some(Menu::ConfirmQuit) => {
@@ -286,10 +354,11 @@ mod tests {
     #[test]
     fn menu_replaces_the_status_line() {
         let mut editor = Editor::with_text("a");
-        editor.resize(100, 2);
+        editor.resize(100, 3);
         editor.handle_key(crate::KeyEvent::ctrl('g'));
         let (rows, _) = render(&editor);
-        assert!(rows[1].starts_with(" [r] restart plugins"), "{}", rows[1]);
+        assert!(rows[1].starts_with(" no plugins are loaded"), "{}", rows[1]);
+        assert!(rows[2].starts_with(" [r] restart all"), "{}", rows[2]);
     }
 
     fn span(text: &str, style: &str) -> Span {

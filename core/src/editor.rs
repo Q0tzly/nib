@@ -102,7 +102,10 @@ impl State {
 /// handled by the core alone, so it works however broken the plugins are.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Menu {
+    /// Lists the plugins.
     Main,
+    /// Actions on one plugin.
+    Plugin(PluginId),
     /// Quitting would drop unsaved changes.
     ConfirmQuit,
 }
@@ -285,6 +288,41 @@ impl Editor {
                 } else {
                     self.state_mut().menu = Some(Menu::ConfirmQuit);
                 }
+            }
+            Menu::Main => {
+                let chosen = match key.code {
+                    KeyCode::Char(c @ '1'..='9') if key.modifiers == Default::default() => {
+                        Some(c as usize - '1' as usize)
+                    }
+                    _ => None,
+                };
+                if let Some(id) = chosen.filter(|&id| id < self.plugins().len()) {
+                    self.state_mut().menu = Some(Menu::Plugin(id));
+                }
+            }
+            Menu::Plugin(id) if plain('r') || plain('d') || plain('l') => {
+                let plugin = &self.plugins()[id];
+                let name = plugin.name.clone();
+                let message = if plain('r') {
+                    match self.restart_plugin(id) {
+                        Ok(()) => format!("{name} restarted"),
+                        Err(err) => format!("{name}: restarting failed: {err}"),
+                    }
+                } else if plain('d') && plugin.enabled {
+                    self.disable_plugin(id);
+                    format!("{name} disabled")
+                } else if plain('d') {
+                    match self.restart_plugin(id) {
+                        Ok(()) => format!("{name} enabled"),
+                        Err(err) => format!("{name}: enabling failed: {err}"),
+                    }
+                } else {
+                    match self.reload_plugin(id) {
+                        Ok(()) => format!("{name} reloaded"),
+                        Err(err) => format!("{name}: reloading failed: {err}"),
+                    }
+                };
+                self.state_mut().message = Some(message);
             }
             Menu::ConfirmQuit if plain('y') => self.state_mut().quit = true,
             // Any other key goes back, so a mistyped menu key is harmless.

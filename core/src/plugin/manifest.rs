@@ -16,9 +16,15 @@ pub(crate) struct Manifest {
 }
 
 pub(crate) fn read(path: &Path) -> Result<Manifest, Error> {
-    let fail = |message: String| Error::Plugin(format!("{}: {message}", path.display()));
-    let text = fs::read_to_string(path).map_err(|err| fail(err.to_string()))?;
-    let manifest: Manifest = toml::from_str(&text).map_err(|err| fail(err.to_string()))?;
+    let text = fs::read_to_string(path)
+        .map_err(|err| Error::Plugin(format!("{}: {err}", path.display())))?;
+    parse(&text, &path.display().to_string())
+}
+
+/// `origin` says where the manifest came from, for errors.
+pub(crate) fn parse(text: &str, origin: &str) -> Result<Manifest, Error> {
+    let fail = |message: String| Error::Plugin(format!("{origin}: {message}"));
+    let manifest: Manifest = toml::from_str(text).map_err(|err| fail(err.to_string()))?;
     let valid_name = !manifest.name.is_empty()
         && manifest
             .name

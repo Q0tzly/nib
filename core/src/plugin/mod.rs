@@ -64,6 +64,20 @@ pub struct PluginInfo {
     pub enabled: bool,
     /// Calls that took longer than `PluginOptions::warn_after`.
     pub slow_calls: u32,
+    /// Why the plugin last failed.
+    pub last_error: Option<String>,
+    /// Loaded from a directory, so it can be reloaded from disk.
+    pub reloadable: bool,
+}
+
+/// Where a plugin's manifest and code come from.
+enum Source<'a> {
+    Dir(&'a Path),
+    /// Built into the editor.
+    Bytes {
+        manifest: &'a str,
+        wasm: &'a [u8],
+    },
 }
 
 #[derive(Default)]
@@ -90,12 +104,15 @@ impl Drop for Runtime {
 struct Plugin {
     name: String,
     version: String,
+    /// `None` for plugins built into the editor.
+    dir: Option<PathBuf>,
     component: Component,
     config: String,
     instance: Option<Instance>,
     enabled: bool,
     crashes: Vec<Instant>,
     slow_calls: u32,
+    last_error: Option<String>,
 }
 
 struct Instance {
@@ -159,7 +176,48 @@ impl Editor {
     /// Loads the plugin in `dir` and calls its `init` with its table from
     /// config.toml.
     pub fn load_plugin(&mut self, dir: &Path) -> Result<(), Error> {
-        let manifest = manifest::read(&dir.join("plugin.toml"))?;
+        self.add_plugin(Source::Dir(dir))
+    }
+
+    /// Loads a plugin built into the editor.
+    pub fn load_builtin_plugin(&mut self, manifest: &str, wasm: &[u8]) -> Result<(), Error> {
+        self.add_plugin(Source::Bytes { manifest, wasm })
+    }
+
+    fn add_plugin(&mut self, source: Source) -> Result<(), Error> {
+        let (manifest, component) = self.compile(&source)?;
+        if self.plugins.entries.iter().any(|p| p.name == manifest.name) {
+            return Err(Error::Plugin(format!("{}: already loaded", manifest.name)));
+        }
+        let id = self.plugins.entries.len();
+        self.plugins.entries.push(Plugin {
+            name: manifest.name.clone(),
+            version: manifest.version,
+            dir: match source {
+                Source::Dir(dir) => Some(dir.to_path_buf()),
+                Source::Bytes { .. } => None,
+            },
+            component,
+            config: self.plugin_config(&manifest.name).to_string(),
+            instance: None,
+            enabled: true,
+            crashes: Vec::new(),
+            slow_calls: 0,
+            last_error: None,
+        });
+        if let Err(message) = self.start_plugin(id) {
+            self.plugins.entries.pop();
+            return Err(Error::Plugin(format!("{}: {message}", manifest.name)));
+        }
+        Ok(())
+    }
+
+    /// Reads and checks the manifest, then compiles the component.
+    fn compile(&mut self, source: &Source) -> Result<(manifest::Manifest, Component), Error> {
+        let manifest = match source {
+            Source::Dir(dir) => manifest::read(&dir.join("plugin.toml"))?,
+            Source::Bytes { manifest, .. } => manifest::parse(manifest, "built-in plugin")?,
+        };
         let fail = |message: String| Error::Plugin(format!("{}: {message}", manifest.name));
         if manifest.api != API_VERSION {
             return Err(fail(format!(
@@ -167,10 +225,6 @@ impl Editor {
                 manifest.api
             )));
         }
-        if self.plugins.entries.iter().any(|p| p.name == manifest.name) {
-            return Err(fail("already loaded".into()));
-        }
-
         if self.plugins.runtime.is_none() {
             let runtime = Runtime::new(&self.plugins.options).map_err(|err| {
                 Error::Plugin(format!("starting the plugin runtime failed: {err}"))
@@ -178,25 +232,66 @@ impl Editor {
             self.plugins.runtime = Some(runtime);
         }
         let engine = &self.plugins.runtime.as_ref().expect("created above").engine;
-        let component = Component::from_file(engine, dir.join("plugin.wasm"))
-            .map_err(|err| fail(format!("{err:#}")))?;
-
-        let id = self.plugins.entries.len();
-        self.plugins.entries.push(Plugin {
-            name: manifest.name.clone(),
-            version: manifest.version.clone(),
-            component,
-            config: self.plugin_config(&manifest.name).to_string(),
-            instance: None,
-            enabled: true,
-            crashes: Vec::new(),
-            slow_calls: 0,
-        });
-        if let Err(message) = self.start_plugin(id) {
-            self.plugins.entries.pop();
-            return Err(fail(message));
+        let component = match source {
+            Source::Dir(dir) => Component::from_file(engine, dir.join("plugin.wasm")),
+            Source::Bytes { wasm, .. } => Component::new(engine, wasm),
         }
-        Ok(())
+        .map_err(|err| fail(format!("{err:#}")))?;
+        Ok((manifest, component))
+    }
+
+    /// Stops the plugin, forgets its failures, and starts it again.
+    pub(crate) fn restart_plugin(&mut self, id: PluginId) -> Result<(), String> {
+        self.stop_plugin(id);
+        let plugin = &mut self.plugins.entries[id];
+        plugin.crashes.clear();
+        plugin.enabled = true;
+        let result = self.start_plugin(id);
+        if result.is_err() {
+            self.plugins.entries[id].enabled = false;
+        }
+        result
+    }
+
+    pub(crate) fn disable_plugin(&mut self, id: PluginId) {
+        self.stop_plugin(id);
+        self.plugins.entries[id].enabled = false;
+    }
+
+    /// Compiles the plugin again from its directory and restarts it.
+    pub(crate) fn reload_plugin(&mut self, id: PluginId) -> Result<(), String> {
+        let plugin = &self.plugins.entries[id];
+        let Some(dir) = plugin.dir.clone() else {
+            return Err("it is built in and has no files to reload".into());
+        };
+        let name = plugin.name.clone();
+        let (manifest, component) = self
+            .compile(&Source::Dir(&dir))
+            .map_err(|err| err.to_string())?;
+        if manifest.name != name {
+            return Err(format!("its name changed to {}", manifest.name));
+        }
+        let plugin = &mut self.plugins.entries[id];
+        plugin.version = manifest.version;
+        plugin.component = component;
+        self.restart_plugin(id)
+    }
+
+    /// Restarts every plugin, including disabled ones, forgetting their past
+    /// failures.
+    pub(crate) fn restart_plugins(&mut self) {
+        let mut failures = Vec::new();
+        for id in 0..self.plugins.entries.len() {
+            if let Err(err) = self.restart_plugin(id) {
+                failures.push(format!("{}: {err}", self.plugins.entries[id].name));
+            }
+        }
+        let message = match (self.plugins.entries.is_empty(), failures.is_empty()) {
+            (true, _) => "no plugins are loaded".to_string(),
+            (false, true) => "plugins restarted".to_string(),
+            (false, false) => format!("restarting failed: {}", failures.join("; ")),
+        };
+        self.state_mut().message = Some(message);
     }
 
     pub fn plugins(&self) -> Vec<PluginInfo> {
@@ -208,31 +303,10 @@ impl Editor {
                 version: p.version.clone(),
                 enabled: p.enabled,
                 slow_calls: p.slow_calls,
+                last_error: p.last_error.clone(),
+                reloadable: p.dir.is_some(),
             })
             .collect()
-    }
-
-    /// Restarts every plugin, including disabled ones, forgetting their past
-    /// failures.
-    pub(crate) fn restart_plugins(&mut self) {
-        let mut failures = Vec::new();
-        for id in 0..self.plugins.entries.len() {
-            self.stop_plugin(id);
-            let plugin = &mut self.plugins.entries[id];
-            plugin.crashes.clear();
-            plugin.enabled = true;
-            if let Err(err) = self.start_plugin(id) {
-                let plugin = &mut self.plugins.entries[id];
-                plugin.enabled = false;
-                failures.push(format!("{}: {err}", plugin.name));
-            }
-        }
-        let message = match (self.plugins.entries.is_empty(), failures.is_empty()) {
-            (true, _) => "no plugins are loaded".to_string(),
-            (false, true) => "plugins restarted".to_string(),
-            (false, false) => format!("restarting failed: {}", failures.join("; ")),
-        };
-        self.state_mut().message = Some(message);
     }
 
     /// Returns whether the plugin handled the key. A failing plugin counts
@@ -284,7 +358,8 @@ impl Editor {
             Ok(Err(message)) => Err(message),
             Err(err) => Err(self.describe_failure(id, &err)),
         };
-        if result.is_err() {
+        if let Err(message) = &result {
+            self.plugins.entries[id].last_error = Some(message.clone());
             self.stop_plugin(id);
         }
         result
@@ -346,6 +421,7 @@ impl Editor {
             .crashes
             .retain(|&time| now.duration_since(time) < CRASH_WINDOW);
         plugin.crashes.push(now);
+        plugin.last_error = Some(reason.clone());
         let name = plugin.name.clone();
 
         let message = if plugin.crashes.len() >= MAX_CRASHES {

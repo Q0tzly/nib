@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use std::{env, fs};
 
-use nib_core::{Config, Editor, KeyCode, KeyEvent, Menu, PluginOptions, Range};
+use nib_core::{Config, Editor, Grid, KeyCode, KeyEvent, Menu, PluginOptions, Range, Symbol};
 
 fn plugin_dir(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -159,4 +159,57 @@ fn key_latency() {
     let per_key = started.elapsed() / keys;
     println!("{per_key:?} per key (insert through test-insert)");
     assert_eq!(editor.plugins()[0].slow_calls, 0);
+}
+
+fn screen(editor: &Editor) -> Vec<String> {
+    let mut grid = Grid::default();
+    editor.render(&mut grid);
+    (0..grid.height())
+        .map(|y| {
+            (0..grid.width())
+                .filter_map(|x| match &grid.cell(x, y).symbol {
+                    Symbol::Char(c) => Some(c.to_string()),
+                    Symbol::Str(s) => Some(s.to_string()),
+                    Symbol::Continuation => None,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn core_menu_manages_each_plugin() {
+    let mut editor = editor_with("test-insert", PluginOptions::default());
+    editor.resize(100, 6);
+
+    editor.handle_key(KeyEvent::ctrl('g'));
+    let rows = screen(&editor);
+    assert!(rows[4].starts_with(" 1  test-insert"), "{rows:#?}");
+    assert!(rows[4].contains("running"), "{rows:#?}");
+    assert!(rows[5].contains("[1-9] choose a plugin"), "{rows:#?}");
+
+    // Choose it and disable it: keys no longer reach it.
+    editor.handle_key(key('1'));
+    assert_eq!(editor.menu(), Some(Menu::Plugin(0)));
+    assert!(screen(&editor)[5].contains("[d] disable  [l] reload from disk"));
+    editor.handle_key(key('d'));
+    assert_eq!(editor.message(), Some("test-insert disabled"));
+    editor.handle_key(key('x'));
+    assert_eq!(editor.buffer().text().to_string(), "");
+
+    // Enable it again.
+    editor.handle_key(KeyEvent::ctrl('g'));
+    editor.handle_key(key('1'));
+    editor.handle_key(key('d'));
+    assert_eq!(editor.message(), Some("test-insert enabled"));
+    editor.handle_key(key('x'));
+    assert_eq!(editor.buffer().text().to_string(), "x");
+
+    // Reload it from disk; its layer comes back with it.
+    editor.handle_key(KeyEvent::ctrl('g'));
+    editor.handle_key(key('1'));
+    editor.handle_key(key('l'));
+    assert_eq!(editor.message(), Some("test-insert reloaded"));
+    editor.handle_key(key('y'));
+    assert_eq!(editor.buffer().text().to_string(), "xy");
 }

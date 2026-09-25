@@ -50,6 +50,10 @@ pub fn theme_style(name: &str) -> Option<Style> {
         "ui.mode.normal" => Some(mode(4)),
         "ui.mode.insert" => Some(mode(2)),
         "ui.mode.select" => Some(mode(5)),
+        "ui.menu.selected" => Some(Style {
+            reverse: true,
+            ..Style::default()
+        }),
         "ui.error" => Some(Style {
             fg: Color::Indexed(1),
             bold: true,

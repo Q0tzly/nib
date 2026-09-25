@@ -2,6 +2,7 @@
 
 pub mod buffer;
 pub mod change;
+pub mod config;
 pub mod editor;
 mod error;
 pub mod grapheme;
@@ -16,6 +17,7 @@ pub mod view;
 
 pub use buffer::{Buffer, Change, LineEnding};
 pub use change::{Assoc, ChangeSet, Edit};
+pub use config::{Config, Indent, Settings};
 pub use editor::{Editor, Menu};
 pub use error::Error;
 pub use grid::{Cell, Color, Cursor, CursorShape, Grid, Style, Symbol};

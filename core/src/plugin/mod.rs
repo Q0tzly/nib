@@ -156,9 +156,9 @@ impl Editor {
         self.plugins.options = options;
     }
 
-    /// Loads the plugin in `dir` and calls its `init` with `config`, a JSON
-    /// object.
-    pub fn load_plugin(&mut self, dir: &Path, config: &str) -> Result<(), Error> {
+    /// Loads the plugin in `dir` and calls its `init` with its table from
+    /// config.toml.
+    pub fn load_plugin(&mut self, dir: &Path) -> Result<(), Error> {
         let manifest = manifest::read(&dir.join("plugin.toml"))?;
         let fail = |message: String| Error::Plugin(format!("{}: {message}", manifest.name));
         if manifest.api != API_VERSION {
@@ -186,7 +186,7 @@ impl Editor {
             name: manifest.name.clone(),
             version: manifest.version.clone(),
             component,
-            config: config.into(),
+            config: self.plugin_config(&manifest.name).to_string(),
             instance: None,
             enabled: true,
             crashes: Vec::new(),

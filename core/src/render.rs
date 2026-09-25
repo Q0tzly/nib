@@ -5,7 +5,6 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::editor::{Editor, Menu};
 use crate::grid::{Cursor, Grid, Style, display_width};
 
-const TAB_WIDTH: u16 = 4;
 const MAIN_MENU: &str =
     "[r] restart plugins  [w] save all and quit  [q] quit  [any other key] back";
 
@@ -18,16 +17,22 @@ impl Editor {
         if width == 0 || height == 0 {
             return None;
         }
-        let text_rows = if height > 1 { height - 1 } else { height };
-        let cursor = self.render_text(grid, text_rows);
+        let cursor = self.render_text(grid, self.text_rows());
         if height > 1 {
             self.render_status(grid, height - 1);
         }
         cursor
     }
 
+    /// Rows left for text below the status line.
+    pub(crate) fn text_rows(&self) -> u16 {
+        let (_, height) = self.size();
+        if height > 1 { height - 1 } else { height }
+    }
+
     fn render_text(&self, grid: &mut Grid, rows: u16) -> Option<Cursor> {
         let width = grid.width();
+        let tab_width = self.settings().tab_width;
         let text = self.buffer().text();
         let view = self.view();
         let cursor_pos = view.cursor(text);
@@ -51,7 +56,7 @@ impl Editor {
                     cursor = Some((x, row));
                 }
                 if grapheme == "\t" {
-                    let end = (x + TAB_WIDTH - x % TAB_WIDTH).min(width);
+                    let end = (x + tab_width - x % tab_width).min(width);
                     while x < end {
                         x = grid.put_grapheme(x, row, " ", style);
                     }
@@ -164,6 +169,15 @@ mod tests {
         let (rows, _) = render(&editor);
         assert_eq!(rows[0], "ab  c       ");
         assert_eq!(rows[1], "        d   ");
+    }
+
+    #[test]
+    fn tab_width_comes_from_config() {
+        let mut editor = Editor::with_text("\tx");
+        editor.apply_config(crate::Config::parse("[core]\ntab-width = 8").unwrap());
+        editor.resize(12, 2);
+        let (rows, _) = render(&editor);
+        assert_eq!(rows[0], "        x   ");
     }
 
     #[test]

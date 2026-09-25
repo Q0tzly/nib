@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::Error;
 use crate::buffer::Buffer;
+use crate::config::{Config, Settings};
 use crate::input::{KeyCode, KeyEvent};
 use crate::plugin::{PluginId, Plugins};
 use crate::view::View;
@@ -20,6 +22,7 @@ pub(crate) struct State {
     pub message: Option<String>,
     /// The core menu is open and takes the next key.
     pub menu: Option<Menu>,
+    pub settings: Settings,
 }
 
 /// The core menu, opened with the reserved menu key. It is drawn and
@@ -36,12 +39,11 @@ pub struct Editor {
     /// editor.
     pub(crate) state: Option<State>,
     pub(crate) plugins: Plugins,
+    /// Each plugin's table from config.toml as JSON.
+    plugin_configs: BTreeMap<String, String>,
 }
 
 const LENT: &str = "editor state is only lent during plugin calls";
-
-/// Reserved by the core; plugins never see it.
-const MENU_KEY: KeyEvent = KeyEvent::ctrl('g');
 
 impl Default for Editor {
     /// Starts with an empty buffer that has no path.
@@ -56,8 +58,10 @@ impl Default for Editor {
                 layers: Vec::new(),
                 message: None,
                 menu: None,
+                settings: Settings::default(),
             }),
             plugins: Plugins::default(),
+            plugin_configs: BTreeMap::new(),
         }
     }
 }
@@ -69,6 +73,22 @@ impl Editor {
 
     pub(crate) fn state_mut(&mut self) -> &mut State {
         self.state.as_mut().expect(LENT)
+    }
+
+    /// Applies config.toml. Call before loading plugins, which get their
+    /// tables from it.
+    pub fn apply_config(&mut self, config: Config) {
+        self.state_mut().settings = config.core;
+        self.plugin_configs = config.plugins;
+    }
+
+    pub fn settings(&self) -> &Settings {
+        &self.state().settings
+    }
+
+    /// The plugin's table from config.toml as JSON, or `{}`.
+    pub fn plugin_config(&self, name: &str) -> &str {
+        self.plugin_configs.get(name).map_or("{}", String::as_str)
     }
 
     /// Opens `path` in the view. The initial empty buffer is replaced if it
@@ -95,6 +115,7 @@ impl Editor {
         let state = self.state_mut();
         state.width = width;
         state.height = height;
+        self.scroll_to_cursor();
     }
 
     pub fn size(&self) -> (u16, u16) {
@@ -118,6 +139,11 @@ impl Editor {
         self.state().message.as_deref()
     }
 
+    /// Shows `message` until the next key.
+    pub fn show_message(&mut self, message: impl Into<String>) {
+        self.state_mut().message = Some(message.into());
+    }
+
     /// Sends the key down the input stack until a plugin handles it.
     ///
     /// The menu key never goes to plugins: it opens the core menu, so
@@ -126,10 +152,30 @@ impl Editor {
         self.state_mut().message = None;
         if let Some(menu) = self.state_mut().menu.take() {
             self.handle_menu_key(menu, key);
-        } else if key == MENU_KEY {
+        } else if key == self.settings().menu_key {
             self.state_mut().menu = Some(Menu::Main);
         } else {
             self.send_to_plugins(key);
+        }
+        self.scroll_to_cursor();
+    }
+
+    /// Scrolls the view so the cursor stays `scroll_margin` lines away from
+    /// the top and bottom edges where possible.
+    fn scroll_to_cursor(&mut self) {
+        let rows = self.text_rows() as usize;
+        let state = self.state_mut();
+        if rows == 0 {
+            return;
+        }
+        let text = state.buffers[state.view.buffer].text();
+        let line = text.byte_to_line(state.view.cursor(text));
+        let margin = (state.settings.scroll_margin as usize).min((rows - 1) / 2);
+        let view = &mut state.view;
+        if line < view.top_line + margin {
+            view.top_line = line.saturating_sub(margin);
+        } else if line + margin >= view.top_line + rows {
+            view.top_line = line + margin + 1 - rows;
         }
     }
 
@@ -148,8 +194,12 @@ impl Editor {
 
     /// Shown while no plugin takes input, when the menu is the only thing
     /// that responds.
-    pub fn key_hint(&self) -> Option<&'static str> {
-        self.state().layers.is_empty().then_some("Ctrl-g: menu")
+    pub fn key_hint(&self) -> Option<String> {
+        let state = self.state();
+        state
+            .layers
+            .is_empty()
+            .then(|| format!("{}: menu", state.settings.menu_key))
     }
 
     pub fn modified_buffers(&self) -> usize {
@@ -249,6 +299,40 @@ mod tests {
                 UndoMode::NewStep,
             )
             .unwrap();
+    }
+
+    #[test]
+    fn view_follows_the_cursor_with_a_margin() {
+        let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        let mut editor = Editor::with_text(&text);
+        editor.resize(20, 10); // 9 text rows, margin 3
+        let line_start = |editor: &Editor, line: usize| editor.buffer().line_start(line).unwrap();
+
+        let pos = line_start(&editor, 50);
+        editor.view_mut().selection = Selection::point(pos);
+        press(&mut editor, &[KeyEvent::new(KeyCode::Escape)]);
+        assert_eq!(editor.view().top_line, 45);
+
+        let pos = line_start(&editor, 44);
+        editor.view_mut().selection = Selection::point(pos);
+        press(&mut editor, &[KeyEvent::new(KeyCode::Escape)]);
+        assert_eq!(editor.view().top_line, 41);
+
+        let pos = line_start(&editor, 1);
+        editor.view_mut().selection = Selection::point(pos);
+        press(&mut editor, &[KeyEvent::new(KeyCode::Escape)]);
+        assert_eq!(editor.view().top_line, 0);
+    }
+
+    #[test]
+    fn menu_key_comes_from_config() {
+        let mut editor = Editor::default();
+        editor.apply_config(Config::parse("[core]\nmenu-key = \"C-]\"").unwrap());
+        assert_eq!(editor.key_hint().as_deref(), Some("Ctrl-]: menu"));
+        press(&mut editor, &[KeyEvent::ctrl('g')]);
+        assert_eq!(editor.menu(), None);
+        press(&mut editor, &[KeyEvent::ctrl(']')]);
+        assert_eq!(editor.menu(), Some(Menu::Main));
     }
 
     #[test]

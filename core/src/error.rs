@@ -20,6 +20,8 @@ pub enum Error {
     Io(io::Error),
     /// Loading or starting a plugin failed.
     Plugin(String),
+    /// config.toml is invalid.
+    Config(String),
 }
 
 impl fmt::Display for Error {
@@ -35,6 +37,7 @@ impl fmt::Display for Error {
             Error::NoPath => f.write_str("buffer has no path"),
             Error::Io(err) => err.fmt(f),
             Error::Plugin(msg) => f.write_str(msg),
+            Error::Config(msg) => write!(f, "config.toml: {msg}"),
         }
     }
 }

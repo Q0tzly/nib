@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use std::{env, fs};
 
-use nib_core::{Editor, KeyCode, KeyEvent, Menu, PluginOptions, Range};
+use nib_core::{Config, Editor, KeyCode, KeyEvent, Menu, PluginOptions, Range};
 
 fn plugin_dir(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -22,7 +22,7 @@ fn plugin_dir(name: &str) -> PathBuf {
 fn editor_with(name: &str, options: PluginOptions) -> Editor {
     let mut editor = Editor::default();
     editor.set_plugin_options(options);
-    editor.load_plugin(&plugin_dir(name), "{}").unwrap();
+    editor.load_plugin(&plugin_dir(name)).unwrap();
     editor
 }
 
@@ -115,8 +115,9 @@ fn failing_plugin_is_restarted_then_disabled() {
 #[test]
 fn init_error_is_reported() {
     let mut editor = Editor::default();
+    editor.apply_config(Config::parse("[plugins.test-misbehave]\nfail = true").unwrap());
     let err = editor
-        .load_plugin(&plugin_dir("test-misbehave"), r#"{"fail":true}"#)
+        .load_plugin(&plugin_dir("test-misbehave"))
         .unwrap_err();
     assert!(err.to_string().contains("asked to fail"), "{err}");
     assert!(editor.plugins().is_empty());
@@ -139,7 +140,7 @@ fn api_version_mismatch_is_rejected() {
     )
     .unwrap();
 
-    let err = Editor::default().load_plugin(&dir, "{}").unwrap_err();
+    let err = Editor::default().load_plugin(&dir).unwrap_err();
     fs::remove_dir_all(&dir).unwrap();
     assert!(err.to_string().contains("needs API 0.0"), "{err}");
 }

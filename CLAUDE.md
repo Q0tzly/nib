@@ -8,7 +8,8 @@ WASM プラグインで全機能を構成するモーダルエディタ。標準
 - `tui/` — ターミナルのフロントエンド（crate: `nib-tui`、実行ファイル `nib`）。`nib-core` は端末に依存しない
 - `api/` — プラグイン API の WIT 定義。コアと全 SDK の唯一の正
 - `sdk/<lang>/` — 言語別プラグイン SDK
-- `plugins/` — 標準プラグイン。公開 API だけで書く（コア内部に依存しない）
+- `plugins/` — 標準プラグイン（`plugins/test/` はテスト用）。公開 API だけで書く（コア内部に依存しない）。wasm32-wasip2 専用の別ワークスペース
+- `xtask/` — cargo だけでは書けないビルド手順（`cargo xtask build-plugins`）
 - `docs/` — 設計ドキュメント
 - `bench/` — 既存エディタと比べる性能計測（`python3 bench/latency.py FILE`）
 
@@ -17,12 +18,15 @@ WASM プラグインで全機能を構成するモーダルエディタ。標準
 ## コマンド
 
 ```sh
+cargo xtask build-plugins   # plugins/ を wasm32-wasip2 向けにビルドし target/plugins/ に置く。コアの統合テストが使う
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-CI も同じ内容（test は Linux / macOS / Windows）。
+プラグインは別ワークスペース（`plugins/Cargo.toml`）なので、fmt と clippy は `--manifest-path plugins/Cargo.toml` を付けて別に回す（clippy は `--target wasm32-wasip2`）。CI も同じ内容（test は Linux / macOS / Windows）。
+
+`api/wit/` を変えたら `cargo xtask build-plugins` をやり直す。古いプラグインは読み込みで型が合わずに失敗する。
 
 ## ライセンス
 

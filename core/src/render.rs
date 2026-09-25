@@ -53,7 +53,10 @@ impl Editor {
             .map(|(id, plugin)| {
                 let state = match (&plugin.last_error, plugin.enabled) {
                     (_, true) if !plugin.has_code => "languages".to_string(),
-                    (_, true) => "running".to_string(),
+                    (_, true) if plugin.waiting => "waiting".to_string(),
+                    // Such as a call stopped with the menu key just now.
+                    (Some(err), true) => format!("running; last error: {err}"),
+                    (None, true) => "running".to_string(),
                     (Some(err), false) => format!("disabled: {err}"),
                     (None, false) => "disabled".to_string(),
                 };
@@ -67,7 +70,9 @@ impl Editor {
                     id + 1,
                     plugin.name,
                     plugin.version,
-                    format!("{}ms", plugin.timeout.as_millis()),
+                    plugin
+                        .timeout
+                        .map_or("none".into(), |t| format!("{}ms", t.as_millis())),
                     plugin.slow_calls,
                 );
                 let style = if selected == Some(id) {

@@ -2,7 +2,7 @@
 //! `cargo xtask build-plugins`.
 
 use std::time::{Duration, Instant};
-use std::{env, fs};
+use std::{env, fs, thread};
 
 use nib_core::{Config, Editor, KeyCode, KeyEvent, Menu, PluginOptions, Range};
 
@@ -202,10 +202,40 @@ fn a_plugins_own_limit_wins_over_the_default() {
     let mut editor = Editor::default();
     editor.apply_config(config);
     editor.load_plugin(&plugin_dir("test-misbehave")).unwrap();
-    assert_eq!(editor.plugins()[0].timeout, Duration::from_millis(50));
+    assert_eq!(editor.plugins()[0].timeout, Some(Duration::from_millis(50)));
     let started = Instant::now();
     editor.handle_key(key('l'));
     assert!(started.elapsed() < Duration::from_millis(500));
+}
+
+#[test]
+fn ctrl_g_stops_a_call_without_a_time_limit() {
+    let mut editor = Editor::default();
+    editor.apply_config(with_plugin("test-misbehave", "timeout-ms = \"none\""));
+    editor.load_plugin(&plugin_dir("test-misbehave")).unwrap();
+    assert_eq!(editor.plugins()[0].timeout, None);
+    // Pressed while the plugin loops, as the terminal's input thread does.
+    let interrupter = editor.interrupter();
+    let pressing = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(300));
+        interrupter.interrupt();
+    });
+    let started = Instant::now();
+    editor.handle_key(key('l'));
+    pressing.join().unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(300));
+    let message = editor.message().unwrap();
+    assert!(message.contains("stopped with Ctrl-g"), "{message}");
+    assert!(editor.plugins()[0].enabled, "restarted");
+}
+
+#[test]
+fn interrupts_only_stop_calls_already_running() {
+    let mut editor = editor_with("test-insert", PluginOptions::default());
+    editor.interrupter().interrupt();
+    editor.handle_key(key('a'));
+    assert_eq!(editor.buffer().text().to_string(), "a");
+    assert_eq!(editor.message(), None);
 }
 
 #[test]

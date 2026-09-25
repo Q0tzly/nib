@@ -4,7 +4,7 @@
 use std::time::Instant;
 use std::{env, fs};
 
-use nib_core::Editor;
+use nib_core::{Config, Editor};
 
 mod common;
 use common::{plugin_dir, type_keys};
@@ -147,6 +147,57 @@ fn the_keymap_tells_others_about_modes() {
             "custom helix.mode_changed \"normal\"",
         ]
     );
+}
+
+/// An editor where `lazy` starts only when needed.
+fn with_lazy(lazy: &str, others: &[&str]) -> Editor {
+    let mut config = Config::default();
+    config.plugins.insert(
+        lazy.into(),
+        Config::parse_plugin(lazy, "load = \"lazy\"").unwrap(),
+    );
+    let mut editor = Editor::default();
+    editor.apply_config(config);
+    for name in [lazy].iter().chain(others) {
+        editor.load_plugin(&plugin_dir(name)).unwrap();
+    }
+    editor
+}
+
+#[test]
+fn lazy_plugins_start_when_their_commands_are_called() {
+    let mut editor = with_lazy("test-events", &[]);
+    assert!(editor.plugins()[0].waiting);
+    assert!(
+        !editor
+            .commands()
+            .iter()
+            .any(|(name, _)| name == "test-events.echo")
+    );
+    assert_eq!(editor.call_command("test-events.echo", "x"), Ok("x".into()));
+    assert!(!editor.plugins()[0].waiting);
+}
+
+#[test]
+fn lazy_plugins_start_for_calls_from_other_plugins() {
+    let mut editor = with_lazy("test-events", &["test-misbehave"]);
+    assert_eq!(
+        editor.call_command("test-misbehave.call-back", ""),
+        Ok("back".into())
+    );
+}
+
+#[test]
+fn lazy_plugins_start_for_their_events() {
+    let mut editor = with_lazy("test-events", &[]);
+    let path = env::temp_dir().join(format!("nib-{}-lazy.txt", std::process::id()));
+    fs::write(&path, "x").unwrap();
+    editor.open(&path).unwrap();
+    editor.deliver_events();
+    assert!(!editor.plugins()[0].waiting);
+    let file = path.file_name().unwrap().to_str().unwrap();
+    assert_eq!(log(&mut editor), [format!("opened {file}")]);
+    fs::remove_file(&path).unwrap();
 }
 
 #[test]

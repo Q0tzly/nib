@@ -166,10 +166,14 @@ pub fn plugin_template(name: &str) -> String {
 # enabled = true
 # A directory to load it from, instead of the built-in {name}.
 # path = "~/dev/{name}"
-# Limits instead of the ones in config.toml's [core].
+# Limits instead of the ones in config.toml's [core]. "none" for no time
+# limit; Ctrl-g still stops it.
 # timeout-ms = 1000
 # init-timeout-ms = 5000
 # memory-mib = 256
+# "lazy" to start it when one of its commands is called or one of its
+# events comes, rather than when nib starts.
+# load = "start"
 
 # Given to the plugin when it starts.
 [settings]

@@ -208,8 +208,12 @@ M1 のゴールは、Helix 風キーマップのプラグインだけで、nib �
 
 ### M3.5 仕上げ
 
+> 完了（2026-09-26）。
+
 - Ctrl-g でプラグインの呼び出しを即座に止める（入力のスレッドが呼び出し中でもキーを見る）
-- `plugins/<name>.toml` の `load = "lazy"` と `timeout-ms = "none"`
+- `plugins/<name>.toml` の `load = "lazy"` と `timeout-ms = "none"`（[architecture.md](architecture.md) の「plugins/<name>.toml」）
+
+確かめ方: 無限ループするテスト用のプラグインを `timeout-ms = "none"` で動かし、Ctrl-g で止める。lazy のプラグインが、コマンドとイベントで起動することをテストで確かめる。
 
 M3 を終えた時点で、git のエディタ（`core.editor`）を hx から nib に切り替える。ハイライト、LSP、ファイル選択がそろうのが M3 で、それより前に切り替えると作業のたびに hx に戻ることになる。以降は nib を普段使いしながら、困ったところから直す。
 

@@ -22,14 +22,14 @@ pub mod view;
 
 pub use buffer::{Buffer, Change, LineEnding};
 pub use change::{Assoc, ChangeSet, Edit};
-pub use config::{Config, Indent, PluginConfig, Settings};
+pub use config::{Config, Indent, Load, PluginConfig, Settings, Timeout};
 pub use editor::{Editor, Menu, ScrollAmount};
 pub use error::Error;
 pub use events::TextChange;
 pub use grid::{Cell, Color, Cursor, CursorShape, Grid, Style, Symbol};
 pub use history::UndoMode;
 pub use input::{KeyCode, KeyEvent, Modifiers};
-pub use plugin::{API_VERSION, PluginInfo, PluginOptions, plugin_name};
+pub use plugin::{API_VERSION, Interrupter, PluginInfo, PluginOptions, plugin_name};
 pub use process::{Stream, Waker};
 pub use selection::{Range, Selection};
 pub use ui::{Side, Span, StyledLine, Theme};

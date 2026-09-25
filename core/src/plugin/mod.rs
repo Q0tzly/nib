@@ -6,17 +6,20 @@ mod manifest;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
-use wasmtime::{Cache, CacheConfig, Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap};
+use wasmtime::{
+    Cache, CacheConfig, Config, Engine, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder,
+    Trap, UpdateDeadline,
+};
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 use wasmtime_wasi::{FsPerms, WasiCtx};
 
 use crate::Error;
-use crate::config::Settings;
+use crate::config::{Load, Settings};
 use crate::editor::{CORE_COMMANDS, Editor, State};
 use crate::events::Event;
 use crate::input::KeyEvent;
@@ -82,11 +85,37 @@ pub struct PluginInfo {
     pub reloadable: bool,
     /// Has code to run; otherwise it only provides data, such as languages.
     pub has_code: bool,
-    /// A call taking longer is stopped.
-    pub timeout: Duration,
+    /// A call taking longer is stopped; `None` for no limit.
+    pub timeout: Option<Duration>,
     /// What it may do beyond the editor API, from its manifest.
     pub capabilities: Vec<String>,
+    /// Loaded lazily and not started yet.
+    pub waiting: bool,
 }
+
+/// Stops the plugin call running when it is used, from any thread. The
+/// frontend uses it when the menu key is pressed, so a plugin stuck in a
+/// call can be stopped. Calls that start afterwards are not affected.
+#[derive(Clone, Debug)]
+pub struct Interrupter(Arc<AtomicU64>);
+
+impl Interrupter {
+    pub fn interrupt(&self) {
+        self.0.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// Why a call stopped when Ctrl-g was pressed during it.
+#[derive(Debug)]
+struct Interrupted;
+
+impl std::fmt::Display for Interrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("stopped with Ctrl-g")
+    }
+}
+
+impl std::error::Error for Interrupted {}
 
 /// Where a plugin's manifest and code come from.
 enum Source<'a> {
@@ -124,6 +153,8 @@ pub(crate) struct Plugins {
     /// Plugins that failed in a call made from another plugin, with the
     /// reason. They are restarted once the outermost call returns.
     failures: Vec<(PluginId, String)>,
+    /// Counts interrupt requests; see `Interrupter`.
+    interrupts: Arc<AtomicU64>,
 }
 
 struct Runtime {
@@ -201,6 +232,8 @@ struct Plugin {
     /// re-enter it.
     instance: Option<Instance>,
     in_call: bool,
+    /// Loaded lazily and not started yet.
+    waiting: bool,
     enabled: bool,
     crashes: Vec<Instant>,
     slow_calls: u32,
@@ -211,9 +244,18 @@ struct Plugin {
 /// defaults.
 #[derive(Clone, Copy)]
 struct Limits {
-    call: Duration,
-    init: Duration,
+    /// `None` for no limit.
+    call: Option<Duration>,
+    init: Option<Duration>,
     memory: usize,
+}
+
+/// The call a store is in, for the checks on each epoch tick.
+struct CallClock {
+    started: Instant,
+    limit: Option<Duration>,
+    /// The interrupt count when it started.
+    interrupts: u64,
 }
 
 struct Instance {
@@ -231,6 +273,8 @@ pub(crate) struct PluginData {
     plugin: PluginId,
     /// It may start programs.
     can_spawn: bool,
+    clock: CallClock,
+    interrupts: Arc<AtomicU64>,
     wasi: WasiCtx,
     table: ResourceTable,
     limits: StoreLimits,
@@ -301,10 +345,15 @@ impl Editor {
         let settings = self.plugin_config(&manifest.name);
         let options = &self.plugins.options;
         let limits = Limits {
-            call: settings.timeout.unwrap_or(options.call_timeout),
-            init: settings.init_timeout.unwrap_or(options.init_timeout),
+            call: settings
+                .timeout
+                .map_or(Some(options.call_timeout), |t| t.limit()),
+            init: settings
+                .init_timeout
+                .map_or(Some(options.init_timeout), |t| t.limit()),
             memory: settings.memory.unwrap_or(options.memory_limit),
         };
+        let lazy = settings.load == Load::Lazy && component.is_some();
         let id = self.plugins.entries.len();
         self.plugins.entries.push(Plugin {
             name: manifest.name.clone(),
@@ -320,11 +369,15 @@ impl Editor {
             capabilities: manifest.capabilities,
             instance: None,
             in_call: false,
+            waiting: lazy,
             enabled: true,
             crashes: Vec::new(),
             slow_calls: 0,
             last_error: None,
         });
+        if lazy {
+            return Ok(());
+        }
         if let Err(message) = self.start_plugin(id) {
             self.plugins.entries.pop();
             return Err(Error::Plugin(format!("{}: {message}", manifest.name)));
@@ -468,6 +521,7 @@ impl Editor {
                 has_code: p.component.is_some(),
                 timeout: p.limits.call,
                 capabilities: p.capabilities.clone(),
+                waiting: p.waiting,
             })
             .collect()
     }
@@ -485,52 +539,22 @@ impl Editor {
     /// Instantiates the plugin and calls `init`. On failure the plugin is
     /// left stopped.
     fn start_plugin(&mut self, id: PluginId) -> Result<(), String> {
-        let Some(component) = self.plugins.entries[id].component.clone() else {
-            // Data only: nothing runs.
-            return Ok(());
-        };
-        let runtime = self.plugins.runtime.as_ref().expect("runtime exists");
-        let plugin = &mut self.plugins.entries[id];
-        let limits = plugin.limits;
-
-        let stderr = MemoryOutputPipe::new(STDERR_CAPACITY);
-        let wasi = wasi_context(&plugin.capabilities, stderr.clone())?;
-        let data = PluginData {
-            state: None,
-            plugins: None,
-            plugin: id,
-            can_spawn: plugin.capabilities.iter().any(|c| c == "process"),
-            wasi,
-            table: ResourceTable::new(),
-            limits: StoreLimitsBuilder::new().memory_size(limits.memory).build(),
-        };
-        let mut store = Store::new(&runtime.engine, data);
-        store.limiter(|data| &mut data.limits);
-        store.set_epoch_deadline(ticks(limits.init));
-        let bindings = bindings::Plugin::instantiate(&mut store, &component, &runtime.linker)
-            .map_err(|err| format!("{err:#}"))?;
-        plugin.instance = Some(Instance {
-            store,
-            bindings,
-            stderr,
-        });
-
-        let config = plugin.config.clone();
-        let timeout = limits.init;
-        let result = self.invoke(id, timeout, |bindings, store| {
-            bindings.nib_plugin_guest().call_init(store, &config)
-        });
-        let result = match result {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(message)) => Err(message),
-            Err(err) => Err(describe_failure(&self.plugins.entries[id], &err)),
-        };
-        if let Err(message) = &result {
-            self.plugins.entries[id].last_error = Some(message.clone());
-            self.stop_plugin(id);
-        }
+        let result = start_in(&mut self.plugins, &mut self.state, id);
         self.handle_nested_failures();
         result
+    }
+
+    /// The handle a frontend uses to stop a plugin stuck in a call.
+    pub fn interrupter(&self) -> Interrupter {
+        Interrupter(self.plugins.interrupts.clone())
+    }
+
+    /// Starts the lazy plugin whose command `name` is, if it has not
+    /// started yet.
+    fn wake_for_command(&mut self, name: &str) {
+        if let Some(id) = waiting_for_command(&self.plugins, self.state(), name) {
+            let _ = self.start_plugin(id);
+        }
     }
 
     /// Calls into a running plugin, handling a failure by restarting or
@@ -559,7 +583,7 @@ impl Editor {
     fn invoke<R>(
         &mut self,
         id: PluginId,
-        timeout: Duration,
+        timeout: Option<Duration>,
         f: impl FnOnce(&bindings::Plugin, &mut Store<PluginData>) -> wasmtime::Result<R>,
     ) -> wasmtime::Result<R> {
         call_in(&mut self.plugins, &mut self.state, id, timeout, f)
@@ -609,6 +633,7 @@ impl Editor {
 
     /// Calls a command a plugin registered, or a core command.
     pub fn call_command(&mut self, name: &str, args: &str) -> Result<String, String> {
+        self.wake_for_command(name);
         let command = self
             .state()
             .commands
@@ -669,6 +694,9 @@ impl Editor {
                     .collect(),
             };
             for id in receivers {
+                if self.plugins.entries[id].waiting {
+                    let _ = self.start_plugin(id);
+                }
                 self.call_plugin(id, |bindings, store| {
                     bindings
                         .nib_plugin_guest()
@@ -702,7 +730,7 @@ fn call_in<R>(
     plugins: &mut Plugins,
     state: &mut Option<State>,
     id: PluginId,
-    timeout: Duration,
+    timeout: Option<Duration>,
     f: impl FnOnce(&bindings::Plugin, &mut Store<PluginData>) -> wasmtime::Result<R>,
 ) -> wasmtime::Result<R> {
     let mut instance = plugins.entries[id]
@@ -719,9 +747,15 @@ fn call_in<R>(
         .begin();
 
     let data = instance.store.data_mut();
+    data.clock = CallClock {
+        started: Instant::now(),
+        limit: timeout,
+        interrupts: data.interrupts.load(Ordering::Acquire),
+    };
     data.state = state.take();
     data.plugins = Some(std::mem::take(plugins));
-    instance.store.set_epoch_deadline(ticks(timeout));
+    // Checked on every tick by `check_call`.
+    instance.store.set_epoch_deadline(1);
     let started = Instant::now();
     let result = f(&instance.bindings, &mut instance.store);
     let elapsed = started.elapsed();
@@ -794,6 +828,25 @@ impl PluginData {
         }
     }
 
+    /// Starts the lazy plugin whose command `name` is, if it has not
+    /// started yet, from within this plugin's call.
+    pub(crate) fn wake_for_command(&mut self, name: &str) -> wasmtime::Result<()> {
+        let plugins = self
+            .plugins
+            .as_mut()
+            .ok_or_else(|| wasmtime::Error::msg("plugins are only reachable during a call"))?;
+        let Some(state) = self.state.as_ref() else {
+            return Ok(());
+        };
+        if let Some(id) = waiting_for_command(plugins, state, name)
+            && let Err(reason) = start_in(plugins, &mut self.state, id)
+        {
+            let plugins = self.plugins.as_mut().expect("still lent");
+            plugins.failures.push((id, reason));
+        }
+        Ok(())
+    }
+
     /// The name of this plugin, for names it registers or emits.
     pub(crate) fn plugin_name(&self) -> wasmtime::Result<&str> {
         let plugins = self
@@ -802,6 +855,97 @@ impl PluginData {
             .ok_or_else(|| wasmtime::Error::msg("plugins are only reachable during a call"))?;
         Ok(&plugins.entries[self.plugin].name)
     }
+}
+
+/// Instantiates plugin `id` and calls its `init`. On failure it is left
+/// stopped, with the reason as its last error.
+fn start_in(plugins: &mut Plugins, state: &mut Option<State>, id: PluginId) -> Result<(), String> {
+    plugins.entries[id].waiting = false;
+    let Some(component) = plugins.entries[id].component.clone() else {
+        // Data only: nothing runs.
+        return Ok(());
+    };
+    let runtime = plugins.runtime.as_ref().expect("runtime exists");
+    let plugin = &mut plugins.entries[id];
+    let limits = plugin.limits;
+
+    let stderr = MemoryOutputPipe::new(STDERR_CAPACITY);
+    let wasi = wasi_context(&plugin.capabilities, stderr.clone())?;
+    let data = PluginData {
+        state: None,
+        plugins: None,
+        plugin: id,
+        can_spawn: plugin.capabilities.iter().any(|c| c == "process"),
+        clock: CallClock {
+            started: Instant::now(),
+            limit: limits.init,
+            interrupts: plugins.interrupts.load(Ordering::Acquire),
+        },
+        interrupts: plugins.interrupts.clone(),
+        wasi,
+        table: ResourceTable::new(),
+        limits: StoreLimitsBuilder::new().memory_size(limits.memory).build(),
+    };
+    let mut store = Store::new(&runtime.engine, data);
+    store.limiter(|data| &mut data.limits);
+    store.epoch_deadline_callback(check_call);
+    store.set_epoch_deadline(1);
+    let bindings = bindings::Plugin::instantiate(&mut store, &component, &runtime.linker)
+        .map_err(|err| format!("{err:#}"))?;
+    plugin.instance = Some(Instance {
+        store,
+        bindings,
+        stderr,
+    });
+
+    let config = plugin.config.clone();
+    let result = call_in(plugins, state, id, limits.init, |bindings, store| {
+        bindings.nib_plugin_guest().call_init(store, &config)
+    });
+    let result = match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(message)) => Err(message),
+        Err(err) => Err(describe_failure(&plugins.entries[id], &err)),
+    };
+    if let Err(message) = &result {
+        let plugin = &mut plugins.entries[id];
+        plugin.last_error = Some(message.clone());
+        plugin.instance = None;
+        if let Some(state) = state {
+            state.remove_plugin_parts(id);
+        }
+    }
+    result
+}
+
+/// Runs on every epoch tick of a call: stops it if Ctrl-g was pressed since
+/// it began or its time is up, and lets it go on for a tick otherwise.
+fn check_call(store: StoreContextMut<PluginData>) -> wasmtime::Result<UpdateDeadline> {
+    let data = store.data();
+    if data.interrupts.load(Ordering::Acquire) != data.clock.interrupts {
+        return Err(Interrupted.into());
+    }
+    if data
+        .clock
+        .limit
+        .is_some_and(|limit| data.clock.started.elapsed() > limit)
+    {
+        return Ok(UpdateDeadline::Interrupt);
+    }
+    Ok(UpdateDeadline::Continue(1))
+}
+
+/// The lazy plugin not started yet that `name` would be a command of, if no
+/// plugin has registered `name`.
+fn waiting_for_command(plugins: &Plugins, state: &State, name: &str) -> Option<PluginId> {
+    if state.commands.iter().any(|command| command.name == name) {
+        return None;
+    }
+    let (plugin, _) = name.split_once('.')?;
+    plugins
+        .entries
+        .iter()
+        .position(|p| p.waiting && p.name == plugin)
 }
 
 /// WASI with what `capabilities` allow: the working directory for the file
@@ -836,6 +980,9 @@ fn describe_failure(plugin: &Plugin, err: &wasmtime::Error) -> String {
     if let Some(Trap::Interrupt) = err.downcast_ref::<Trap>() {
         return "it took too long".into();
     }
+    if err.downcast_ref::<Interrupted>().is_some() {
+        return Interrupted.to_string();
+    }
     // A Rust plugin prints its panic message to stderr before trapping.
     let panic = plugin
         .instance
@@ -853,11 +1000,6 @@ fn panic_message(stderr: &[u8]) -> Option<String> {
     lines.next().map(|line| format!("panicked: {line}"))
 }
 
-/// Epoch ticks covering at least `duration`.
-fn ticks(duration: Duration) -> u64 {
-    (duration.as_millis() / EPOCH_TICK.as_millis()) as u64 + 1
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -870,11 +1012,5 @@ mod tests {
             Some("panicked: asked to panic")
         );
         assert_eq!(panic_message(b"just output\n"), None);
-    }
-
-    #[test]
-    fn ticks_cover_the_duration() {
-        assert_eq!(ticks(Duration::from_millis(0)), 1);
-        assert_eq!(ticks(Duration::from_millis(100)), 11);
     }
 }

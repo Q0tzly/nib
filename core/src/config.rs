@@ -84,9 +84,10 @@ pub struct PluginConfig {
     pub path: Option<PathBuf>,
     pub enabled: bool,
     /// Limits for this plugin, instead of the ones in `[core]`.
-    pub timeout: Option<Duration>,
-    pub init_timeout: Option<Duration>,
+    pub timeout: Option<Timeout>,
+    pub init_timeout: Option<Timeout>,
     pub memory: Option<usize>,
+    pub load: Load,
     /// `[settings]` as JSON, passed to the plugin's `init` as is.
     pub settings: String,
 }
@@ -99,9 +100,46 @@ impl Default for PluginConfig {
             timeout: None,
             init_timeout: None,
             memory: None,
+            load: Load::Start,
             settings: "{}".into(),
         }
     }
+}
+
+/// How long a plugin call may take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Timeout {
+    After(Duration),
+    /// Only Ctrl-g stops it.
+    Never,
+}
+
+impl Timeout {
+    pub fn limit(self) -> Option<Duration> {
+        match self {
+            Timeout::After(duration) => Some(duration),
+            Timeout::Never => None,
+        }
+    }
+}
+
+/// When a plugin starts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Load {
+    /// When nib starts.
+    #[default]
+    Start,
+    /// When one of its commands is called or one of its events arrives.
+    Lazy,
+}
+
+/// A number of milliseconds, or "none".
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawTimeout {
+    Millis(u64),
+    Word(String),
 }
 
 #[derive(Deserialize)]
@@ -110,9 +148,11 @@ struct RawPluginConfig {
     path: Option<PathBuf>,
     #[serde(default = "enabled")]
     enabled: bool,
-    timeout_ms: Option<u64>,
-    init_timeout_ms: Option<u64>,
+    timeout_ms: Option<RawTimeout>,
+    init_timeout_ms: Option<RawTimeout>,
     memory_mib: Option<usize>,
+    #[serde(default)]
+    load: Load,
     #[serde(default)]
     settings: toml::Table,
 }
@@ -309,12 +349,22 @@ impl Config {
     pub fn parse_plugin(name: &str, text: &str) -> Result<PluginConfig, Error> {
         let fail = |message: String| Error::Config(format!("plugins/{name}.toml: {message}"));
         let raw: RawPluginConfig = toml::from_str(text).map_err(|err| fail(err.to_string()))?;
-        let limit = |ms: Option<u64>, key| ms.map(|ms| timeout(key, ms)).transpose();
+        let limit = |raw: Option<RawTimeout>, key| {
+            raw.map(|raw| match raw {
+                RawTimeout::Millis(ms) => timeout(key, ms).map(Timeout::After),
+                RawTimeout::Word(word) if word == "none" => Ok(Timeout::Never),
+                RawTimeout::Word(word) => Err(format!(
+                    "{key} must be milliseconds or \"none\", not {word:?}"
+                )),
+            })
+            .transpose()
+        };
         Ok(PluginConfig {
             path: raw.path,
             enabled: raw.enabled,
             timeout: limit(raw.timeout_ms, "timeout-ms").map_err(fail)?,
             init_timeout: limit(raw.init_timeout_ms, "init-timeout-ms").map_err(fail)?,
+            load: raw.load,
             memory: raw
                 .memory_mib
                 .map(|mib| memory("memory-mib", mib))
@@ -394,7 +444,7 @@ mod tests {
         .unwrap();
         assert_eq!(plugin.path, Some(PathBuf::from("~/dev/nib-lsp")));
         assert!(plugin.enabled);
-        assert_eq!(plugin.timeout, Some(Duration::from_secs(2)));
+        assert_eq!(plugin.timeout, Some(Timeout::After(Duration::from_secs(2))));
         assert_eq!(plugin.init_timeout, None);
         assert_eq!(plugin.memory, Some(512 << 20));
         assert_eq!(
@@ -406,6 +456,19 @@ mod tests {
         assert_eq!(empty, PluginConfig::default());
         let err = Config::parse_plugin("x", "enable = false").unwrap_err();
         assert!(err.to_string().contains("plugins/x.toml: "), "{err}");
+    }
+
+    #[test]
+    fn plugins_can_go_without_a_time_limit_and_start_late() {
+        let plugin = Config::parse_plugin("x", "timeout-ms = \"none\"\nload = \"lazy\"").unwrap();
+        assert_eq!(plugin.timeout, Some(Timeout::Never));
+        assert_eq!(plugin.load, Load::Lazy);
+        let err = Config::parse_plugin("x", "timeout-ms = \"forever\"").unwrap_err();
+        assert!(
+            err.to_string().contains("milliseconds or \"none\""),
+            "{err}"
+        );
+        assert!(Config::parse_plugin("x", "load = \"later\"").is_err());
     }
 
     #[test]

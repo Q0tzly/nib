@@ -83,9 +83,19 @@ fn start_input(editor: &mut Editor) -> Receiver<Wake> {
     editor.set_waker(Some(Arc::new(move || {
         let _ = background.send(Wake::Background);
     })));
+    let interrupter = editor.interrupter();
+    let menu_key = editor.settings().menu_key;
     thread::spawn(move || {
         loop {
             let event = event::read();
+            // The menu key stops a plugin stuck in a call, which the main
+            // thread cannot do while it waits for the call.
+            if let Ok(Event::Key(key)) = &event
+                && key.kind != KeyEventKind::Release
+                && convert_key(*key) == Some(menu_key)
+            {
+                interrupter.interrupt();
+            }
             let failed = event.is_err();
             if sender.send(Wake::Input(event)).is_err() || failed {
                 return;

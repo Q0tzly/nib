@@ -504,6 +504,7 @@ impl commands::Host for PluginData {
     }
 
     fn call(&mut self, name: String, args: String) -> HostResult<Result<String, String>> {
+        self.wake_for_command(&name)?;
         let state = self.state()?;
         match state.commands.iter().find(|command| command.name == name) {
             Some(command) => {

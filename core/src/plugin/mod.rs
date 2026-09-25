@@ -366,7 +366,7 @@ impl Editor {
     /// Drops the instance and everything the plugin put into the editor.
     fn stop_plugin(&mut self, id: PluginId) {
         self.plugins.entries[id].instance = None;
-        self.state_mut().layers.retain(|&layer| layer != id);
+        self.state_mut().remove_plugin_parts(id);
     }
 
     fn describe_failure(&self, id: PluginId, err: &wasmtime::Error) -> String {

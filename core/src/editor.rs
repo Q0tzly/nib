@@ -6,6 +6,7 @@ use crate::buffer::Buffer;
 use crate::config::{Config, Settings};
 use crate::input::{KeyCode, KeyEvent};
 use crate::plugin::{PluginId, Plugins};
+use crate::ui::{Panel, StatusItem};
 use crate::view::View;
 
 /// Everything plugins can see and change. While a plugin runs, it is lent to
@@ -23,6 +24,78 @@ pub(crate) struct State {
     /// The core menu is open and takes the next key.
     pub menu: Option<Menu>,
     pub settings: Settings,
+    pub status: Vec<StatusItem>,
+    /// Bottom panels, in the order they were opened.
+    pub panels: Vec<Panel>,
+    pub last_panel_id: u32,
+}
+
+impl State {
+    /// Opens `path` in the view. The initial empty buffer is replaced if it
+    /// was never touched.
+    pub fn open(&mut self, path: impl Into<PathBuf>) -> Result<(), Error> {
+        let buffer = Buffer::open(path)?;
+        let scratch = &self.buffers[0];
+        if self.buffers.len() == 1
+            && scratch.path().is_none()
+            && scratch.is_empty()
+            && !scratch.is_modified()
+        {
+            self.buffers[0] = buffer;
+            self.view = View::new(0);
+        } else {
+            self.buffers.push(buffer);
+            self.view = View::new(self.buffers.len() - 1);
+        }
+        Ok(())
+    }
+
+    pub fn modified_buffers(&self) -> usize {
+        self.buffers.iter().filter(|b| b.is_modified()).count()
+    }
+
+    /// Runs a core command. Arguments and the result are JSON.
+    pub fn run_command(&mut self, name: &str, args: &str) -> Result<String, String> {
+        let args: serde_json::Value = match args.trim() {
+            "" => serde_json::Value::Null,
+            args => serde_json::from_str(args)
+                .map_err(|err| format!("{name}: invalid arguments: {err}"))?,
+        };
+        match name {
+            "buffer.save" => {
+                let buffer = &mut self.buffers[self.view.buffer];
+                buffer.save().map_err(|err| err.to_string())?;
+            }
+            "buffer.open" => {
+                let path = args["path"]
+                    .as_str()
+                    .ok_or(r#"buffer.open needs {"path": string}"#)?;
+                self.open(path).map_err(|err| format!("{path}: {err}"))?;
+            }
+            "editor.quit" => {
+                let force = args["force"].as_bool().unwrap_or(false);
+                let modified = self.modified_buffers();
+                if modified > 0 && !force {
+                    let buffers = if modified == 1 {
+                        "buffer has"
+                    } else {
+                        "buffers have"
+                    };
+                    return Err(format!("{modified} {buffers} unsaved changes"));
+                }
+                self.quit = true;
+            }
+            _ => return Err(format!("no command named {name}")),
+        }
+        Ok("null".into())
+    }
+
+    /// Removes everything `plugin` put into the editor.
+    pub fn remove_plugin_parts(&mut self, plugin: PluginId) {
+        self.layers.retain(|&layer| layer != plugin);
+        self.status.retain(|item| item.owner != plugin);
+        self.panels.retain(|panel| panel.owner != plugin);
+    }
 }
 
 /// The core menu, opened with the reserved menu key. It is drawn and
@@ -59,6 +132,9 @@ impl Default for Editor {
                 message: None,
                 menu: None,
                 settings: Settings::default(),
+                status: Vec::new(),
+                panels: Vec::new(),
+                last_panel_id: 0,
             }),
             plugins: Plugins::default(),
             plugin_configs: BTreeMap::new(),
@@ -94,21 +170,7 @@ impl Editor {
     /// Opens `path` in the view. The initial empty buffer is replaced if it
     /// was never touched.
     pub fn open(&mut self, path: impl Into<PathBuf>) -> Result<(), Error> {
-        let buffer = Buffer::open(path)?;
-        let state = self.state_mut();
-        let scratch = &state.buffers[0];
-        if state.buffers.len() == 1
-            && scratch.path().is_none()
-            && scratch.is_empty()
-            && !scratch.is_modified()
-        {
-            state.buffers[0] = buffer;
-            state.view = View::new(0);
-        } else {
-            state.buffers.push(buffer);
-            state.view = View::new(state.buffers.len() - 1);
-        }
-        Ok(())
+        self.state_mut().open(path)
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {
@@ -203,11 +265,7 @@ impl Editor {
     }
 
     pub fn modified_buffers(&self) -> usize {
-        self.state()
-            .buffers
-            .iter()
-            .filter(|buffer| buffer.is_modified())
-            .count()
+        self.state().modified_buffers()
     }
 
     fn handle_menu_key(&mut self, menu: Menu, key: KeyEvent) {
@@ -333,6 +391,34 @@ mod tests {
         assert_eq!(editor.menu(), None);
         press(&mut editor, &[KeyEvent::ctrl(']')]);
         assert_eq!(editor.menu(), Some(Menu::Main));
+    }
+
+    #[test]
+    fn core_commands() {
+        let mut editor = Editor::with_text("a");
+        let state = editor.state_mut();
+        assert_eq!(
+            state.run_command("buffer.save", ""),
+            Err("buffer has no path".into())
+        );
+        assert_eq!(
+            state.run_command("nope", "{}"),
+            Err("no command named nope".into())
+        );
+        assert!(state.run_command("buffer.open", "{}").is_err());
+
+        modify(&mut editor);
+        let state = editor.state_mut();
+        assert_eq!(
+            state.run_command("editor.quit", ""),
+            Err("1 buffer has unsaved changes".into())
+        );
+        assert!(!state.quit);
+        assert_eq!(
+            state.run_command("editor.quit", r#"{"force":true}"#),
+            Ok("null".into())
+        );
+        assert!(state.quit);
     }
 
     #[test]

@@ -9,10 +9,12 @@ pub mod grapheme;
 pub mod grid;
 mod history;
 pub mod input;
+mod layout;
 mod plugin;
 mod render;
 pub mod search;
 pub mod selection;
+pub mod ui;
 pub mod view;
 
 pub use buffer::{Buffer, Change, LineEnding};
@@ -25,4 +27,5 @@ pub use history::UndoMode;
 pub use input::{KeyCode, KeyEvent, Modifiers};
 pub use plugin::{API_VERSION, PluginInfo, PluginOptions};
 pub use selection::{Range, Selection};
+pub use ui::{Side, Span, StyledLine};
 pub use view::View;

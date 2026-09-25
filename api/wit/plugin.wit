@@ -43,6 +43,11 @@ interface types {
     }
 
     record key-event { code: key-code, modifiers: modifiers }
+
+    /// `style` names a theme entry, e.g. "ui.mode.normal".
+    record span { text: string, style: string }
+
+    type styled-line = list<span>;
 }
 
 interface editor {
@@ -90,6 +95,11 @@ interface editor {
         undo: func() -> bool;
         redo: func() -> bool;
         set-cursor-shape: func(shape: cursor-shape);
+        /// Moves `lines` display lines down, or up if negative, from `pos`.
+        /// Aims for display `column`, or the column of `pos` when none.
+        /// Returns the new position and the column aimed for; pass that
+        /// column back to keep it across short lines.
+        move-vertically: func(pos: offset, lines: s32, column: option<u32>) -> result<tuple<offset, u32>, error>;
     }
 
     active-view: func() -> view;
@@ -101,6 +111,48 @@ interface input {
     push-layer: func();
     /// Removes this plugin's topmost layer.
     pop-layer: func();
+}
+
+interface commands {
+    /// Runs a command by its full name. Arguments and the result are JSON.
+    ///
+    /// Core commands:
+    /// - `buffer.save`: saves the current buffer.
+    /// - `buffer.open` `{"path": string}`: opens a file in the view.
+    /// - `editor.quit` `{"force": bool}`: quits; without `force`, fails when
+    ///   buffers have unsaved changes.
+    call: func(name: string, args: string) -> result<string, string>;
+}
+
+interface ui {
+    use types.{styled-line};
+
+    enum side { left, right }
+
+    /// Shows an item in the status line, replacing this plugin's item with
+    /// the same `id`. Items on one side are ordered by `priority`, lowest
+    /// first.
+    set-status: func(id: string, side: side, priority: s32, content: styled-line);
+    remove-status: func(id: string);
+
+    /// Shows a message until the next key.
+    show-message: func(text: string);
+
+    /// Lines at the bottom of the screen, above the status line. Dropping the
+    /// panel closes it.
+    resource panel {
+        constructor(lines: list<styled-line>);
+        update: func(lines: list<styled-line>);
+        /// A line index and a byte offset into that line's text. While set,
+        /// the cursor is drawn there instead of in the buffer.
+        set-cursor: func(cursor: option<tuple<u32, u32>>);
+    }
+}
+
+interface settings {
+    /// An editing setting of the core as JSON: "tab-width", "indent" (a
+    /// number of spaces or "tab"), or "scroll-margin".
+    get: func(key: string) -> option<string>;
 }
 
 interface guest {
@@ -123,6 +175,9 @@ interface guest {
 world plugin {
     import editor;
     import input;
+    import commands;
+    import ui;
+    import settings;
 
     export guest;
 }

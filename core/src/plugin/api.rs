@@ -6,10 +6,13 @@ use wasmtime_wasi::{WasiCtxView, WasiView};
 use super::PluginData;
 use crate::buffer::Buffer;
 use crate::editor::State;
+use crate::grapheme;
 use crate::grid::CursorShape;
 use crate::history::UndoMode;
 use crate::input::{KeyCode, KeyEvent};
+use crate::layout;
 use crate::selection::{Range, Selection};
+use crate::ui::{Panel, Side, Span, StatusItem, StyledLine};
 use crate::{Edit, Error};
 
 pub(crate) mod bindings {
@@ -22,17 +25,21 @@ pub(crate) mod bindings {
         with: {
             "nib:plugin/editor.buffer": super::BufferHandle,
             "nib:plugin/editor.view": super::ViewHandle,
+            "nib:plugin/ui.panel": super::PanelHandle,
         },
     });
 }
 
-use bindings::nib::plugin::{editor, input, types as wit};
+use bindings::nib::plugin::{commands, editor, input, settings, types as wit, ui as wit_ui};
 
 /// A buffer as seen by a plugin. The resource's rep is the buffer index.
 pub struct BufferHandle;
 
 /// A view as seen by a plugin. There is one view for now, with rep 0.
 pub struct ViewHandle;
+
+/// A panel as seen by a plugin. The resource's rep is the panel id.
+pub struct PanelHandle;
 
 type HostResult<T> = wasmtime::Result<T>;
 
@@ -260,6 +267,26 @@ impl editor::HostView for PluginData {
             .is_some())
     }
 
+    fn move_vertically(
+        &mut self,
+        view: Resource<ViewHandle>,
+        at: u64,
+        lines: i32,
+        column: Option<u32>,
+    ) -> HostResult<Result<(u64, u32), editor::Error>> {
+        let state = self.view_state(&view)?;
+        let tab_width = state.settings.tab_width;
+        let text = state.buffers[state.view.buffer].text();
+        wit_result(
+            pos(at)
+                .and_then(|at| {
+                    grapheme::check_position(text, at)?;
+                    Ok(layout::move_vertically(text, at, lines, column, tab_width))
+                })
+                .map(|(at, column)| (at as u64, column)),
+        )
+    }
+
     fn set_cursor_shape(
         &mut self,
         view: Resource<ViewHandle>,
@@ -294,6 +321,119 @@ impl input::Host for PluginData {
         }
         Ok(())
     }
+}
+
+impl commands::Host for PluginData {
+    fn call(&mut self, name: String, args: String) -> HostResult<Result<String, String>> {
+        Ok(self.state()?.run_command(&name, &args))
+    }
+}
+
+impl settings::Host for PluginData {
+    fn get(&mut self, key: String) -> HostResult<Option<String>> {
+        Ok(self.state()?.settings.get_json(&key))
+    }
+}
+
+impl wit_ui::Host for PluginData {
+    fn set_status(
+        &mut self,
+        id: String,
+        side: wit_ui::Side,
+        priority: i32,
+        content: Vec<wit::Span>,
+    ) -> HostResult<()> {
+        let owner = self.plugin;
+        let status = &mut self.state()?.status;
+        status.retain(|item| !(item.owner == owner && item.id == id));
+        status.push(StatusItem {
+            owner,
+            id,
+            side: match side {
+                wit_ui::Side::Left => Side::Left,
+                wit_ui::Side::Right => Side::Right,
+            },
+            priority,
+            content: styled_line(content),
+        });
+        Ok(())
+    }
+
+    fn remove_status(&mut self, id: String) -> HostResult<()> {
+        let owner = self.plugin;
+        self.state()?
+            .status
+            .retain(|item| !(item.owner == owner && item.id == id));
+        Ok(())
+    }
+
+    fn show_message(&mut self, text: String) -> HostResult<()> {
+        self.state()?.message = Some(text);
+        Ok(())
+    }
+}
+
+impl wit_ui::HostPanel for PluginData {
+    fn new(&mut self, lines: Vec<Vec<wit::Span>>) -> HostResult<Resource<PanelHandle>> {
+        let owner = self.plugin;
+        let state = self.state()?;
+        state.last_panel_id += 1;
+        let id = state.last_panel_id;
+        state.panels.push(Panel {
+            id,
+            owner,
+            lines: lines.into_iter().map(styled_line).collect(),
+            cursor: None,
+        });
+        Ok(Resource::new_own(id))
+    }
+
+    fn update(
+        &mut self,
+        panel: Resource<PanelHandle>,
+        lines: Vec<Vec<wit::Span>>,
+    ) -> HostResult<()> {
+        self.panel(&panel)?.lines = lines.into_iter().map(styled_line).collect();
+        Ok(())
+    }
+
+    fn set_cursor(
+        &mut self,
+        panel: Resource<PanelHandle>,
+        cursor: Option<(u32, u32)>,
+    ) -> HostResult<()> {
+        self.panel(&panel)?.cursor = cursor;
+        Ok(())
+    }
+
+    fn drop(&mut self, panel: Resource<PanelHandle>) -> HostResult<()> {
+        // Outside a call, the plugin is being stopped and its panels are
+        // removed anyway.
+        if let Some(state) = self.state.as_mut() {
+            state.panels.retain(|p| p.id != panel.rep());
+        }
+        Ok(())
+    }
+}
+
+impl PluginData {
+    fn panel(&mut self, handle: &Resource<PanelHandle>) -> HostResult<&mut Panel> {
+        self.state()?
+            .panels
+            .iter_mut()
+            .find(|panel| panel.id == handle.rep())
+            .ok_or_else(|| wasmtime::Error::msg("the panel is closed"))
+    }
+}
+
+fn styled_line(spans: Vec<wit::Span>) -> StyledLine {
+    spans
+        .into_iter()
+        .map(|span| Span {
+            text: span.text,
+            style: span.style,
+        })
+        .collect()
 }
 
 pub(crate) fn key_event(key: KeyEvent) -> wit::KeyEvent {

@@ -1,10 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use crate::Error;
 use crate::buffer::Buffer;
 use crate::config::{Config, Settings};
 use crate::input::{KeyCode, KeyEvent};
+use crate::layout;
 use crate::plugin::{PluginId, Plugins};
 use crate::ui::{Panel, StatusItem};
 use crate::view::View;
@@ -28,12 +29,31 @@ pub(crate) struct State {
     /// Bottom panels, in the order they were opened.
     pub panels: Vec<Panel>,
     pub last_panel_id: u32,
+    /// Views of buffers not shown, so switching back restores the selection
+    /// and scroll position.
+    pub hidden_views: HashMap<usize, View>,
 }
 
 impl State {
     /// Opens `path` in the view. The initial empty buffer is replaced if it
     /// was never touched.
     pub fn open(&mut self, path: impl Into<PathBuf>) -> Result<(), Error> {
+        let path = path.into();
+        let same_file = |other: &std::path::Path| {
+            other == path
+                || matches!(
+                    (other.canonicalize(), path.canonicalize()),
+                    (Ok(a), Ok(b)) if a == b
+                )
+        };
+        if let Some(open) = self
+            .buffers
+            .iter()
+            .position(|b| b.path().is_some_and(same_file))
+        {
+            self.switch_to(open);
+            return Ok(());
+        }
         let buffer = Buffer::open(path)?;
         let scratch = &self.buffers[0];
         if self.buffers.len() == 1
@@ -45,9 +65,48 @@ impl State {
             self.view = View::new(0);
         } else {
             self.buffers.push(buffer);
-            self.view = View::new(self.buffers.len() - 1);
+            self.switch_to(self.buffers.len() - 1);
         }
         Ok(())
+    }
+
+    /// Shows buffer `index`, keeping the view of the current one for later.
+    pub fn switch_to(&mut self, index: usize) {
+        if index == self.view.buffer {
+            return;
+        }
+        let view = self
+            .hidden_views
+            .remove(&index)
+            .unwrap_or_else(|| View::new(index));
+        let old = std::mem::replace(&mut self.view, view);
+        self.hidden_views.insert(old.buffer, old);
+    }
+
+    /// Rows left for text above the panels and the status line.
+    pub fn text_rows(&self) -> u16 {
+        let status = u16::from(self.height > 1);
+        let panels: usize = self.panels.iter().map(|p| p.lines.len()).sum();
+        self.height
+            .saturating_sub(status)
+            .saturating_sub(panels.min(u16::MAX as usize) as u16)
+    }
+
+    /// Scrolls the view without moving the cursor. Returns the number of
+    /// lines `amount` stands for, so a keymap can move the cursor as far.
+    pub fn scroll(&mut self, amount: ScrollAmount) -> i32 {
+        let rows = i32::from(self.text_rows().max(1));
+        let lines = match amount {
+            ScrollAmount::Lines(n) => n,
+            ScrollAmount::HalfPage(n) => n.saturating_mul((rows / 2).max(1)),
+            ScrollAmount::Page(n) => n.saturating_mul(rows),
+        };
+        let last = self.buffers[self.view.buffer]
+            .line_count()
+            .saturating_sub(1);
+        let top = self.view.top_line as i64 + i64::from(lines);
+        self.view.top_line = top.clamp(0, last as i64) as usize;
+        lines
     }
 
     pub fn modified_buffers(&self) -> usize {
@@ -71,6 +130,11 @@ impl State {
                     .as_str()
                     .ok_or(r#"buffer.open needs {"path": string}"#)?;
                 self.open(path).map_err(|err| format!("{path}: {err}"))?;
+            }
+            "buffer.next" | "buffer.previous" => {
+                let count = self.buffers.len();
+                let step = if name == "buffer.next" { 1 } else { count - 1 };
+                self.switch_to((self.view.buffer + step) % count);
             }
             "editor.quit" => {
                 let force = args["force"].as_bool().unwrap_or(false);
@@ -96,6 +160,13 @@ impl State {
         self.status.retain(|item| item.owner != plugin);
         self.panels.retain(|panel| panel.owner != plugin);
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollAmount {
+    Lines(i32),
+    HalfPage(i32),
+    Page(i32),
 }
 
 /// The core menu, opened with the reserved menu key. It is drawn and
@@ -138,6 +209,7 @@ impl Default for Editor {
                 status: Vec::new(),
                 panels: Vec::new(),
                 last_panel_id: 0,
+                hidden_views: HashMap::new(),
             }),
             plugins: Plugins::default(),
             plugin_configs: BTreeMap::new(),
@@ -238,13 +310,21 @@ impl Editor {
             return;
         }
         let text = state.buffers[state.view.buffer].text();
-        let line = text.byte_to_line(state.view.cursor(text));
+        let cursor = state.view.cursor(text);
+        let line = text.byte_to_line(cursor);
+        let column = layout::column_of(text, cursor, state.settings.tab_width);
+        let width = u32::from(state.width.max(1));
         let margin = (state.settings.scroll_margin as usize).min((rows - 1) / 2);
         let view = &mut state.view;
         if line < view.top_line + margin {
             view.top_line = line.saturating_sub(margin);
         } else if line + margin >= view.top_line + rows {
             view.top_line = line + margin + 1 - rows;
+        }
+        if column < view.left_col {
+            view.left_col = column;
+        } else if column >= view.left_col + width {
+            view.left_col = column + 1 - width;
         }
     }
 
@@ -433,6 +513,49 @@ mod tests {
         assert_eq!(editor.menu(), None);
         press(&mut editor, &[KeyEvent::ctrl(']')]);
         assert_eq!(editor.menu(), Some(Menu::Main));
+    }
+
+    #[test]
+    fn switching_buffers_keeps_each_view() {
+        let dir = std::env::temp_dir();
+        let a = dir.join(format!("nib-{}-a.txt", std::process::id()));
+        let b = dir.join(format!("nib-{}-b.txt", std::process::id()));
+        fs::write(&a, "aaa").unwrap();
+        fs::write(&b, "bbb").unwrap();
+        let mut editor = Editor::default();
+        editor.open(&a).unwrap();
+        editor.view_mut().selection = Selection::point(2);
+        editor.open(&b).unwrap();
+        assert_eq!(editor.buffer().text().to_string(), "bbb");
+        assert_eq!(editor.view().selection, Selection::point(0));
+
+        let state = editor.state_mut();
+        state.run_command("buffer.previous", "").unwrap();
+        assert_eq!(editor.buffer().text().to_string(), "aaa");
+        assert_eq!(editor.view().selection, Selection::point(2));
+        editor.state_mut().run_command("buffer.next", "").unwrap();
+        assert_eq!(editor.buffer().text().to_string(), "bbb");
+
+        // Opening a file that is open switches to it.
+        editor.open(&a).unwrap();
+        assert_eq!(editor.state().buffers.len(), 2);
+        assert_eq!(editor.view().selection, Selection::point(2));
+        fs::remove_file(&a).unwrap();
+        fs::remove_file(&b).unwrap();
+    }
+
+    #[test]
+    fn scrolling_reports_lines_and_stops_at_the_ends() {
+        let text: String = (0..50).map(|i| format!("{i}\n")).collect();
+        let mut editor = Editor::with_text(&text);
+        editor.resize(10, 11); // 10 text rows
+        let state = editor.state_mut();
+        assert_eq!(state.scroll(ScrollAmount::HalfPage(1)), 5);
+        assert_eq!(state.view.top_line, 5);
+        assert_eq!(state.scroll(ScrollAmount::Page(-1)), -10);
+        assert_eq!(state.view.top_line, 0);
+        state.scroll(ScrollAmount::Lines(100));
+        assert_eq!(state.view.top_line, 50);
     }
 
     #[test]

@@ -84,6 +84,12 @@ interface editor {
         find-all: func(pattern: string, start: offset, end: offset) -> result<list<tuple<offset, offset>>, error>;
     }
 
+    variant scroll-amount {
+        lines(s32),
+        half-page(s32),
+        page(s32),
+    }
+
     resource view {
         buffer: func() -> buffer;
         selection: func() -> selection;
@@ -100,6 +106,11 @@ interface editor {
         /// Returns the new position and the column aimed for; pass that
         /// column back to keep it across short lines.
         move-vertically: func(pos: offset, lines: s32, column: option<u32>) -> result<tuple<offset, u32>, error>;
+        /// Scrolls without moving the cursor, and returns how many lines
+        /// `amount` stands for, negative upward. Move the cursor as many
+        /// lines to scroll with it, as Ctrl-d does; the core keeps the
+        /// cursor in view either way.
+        scroll: func(amount: scroll-amount) -> s32;
     }
 
     active-view: func() -> view;

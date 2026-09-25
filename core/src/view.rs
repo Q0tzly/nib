@@ -10,6 +10,8 @@ pub struct View {
     pub selection: Selection,
     /// The first line shown.
     pub top_line: usize,
+    /// The first display column shown, for lines wider than the screen.
+    pub left_col: u32,
     pub cursor_shape: CursorShape,
 }
 
@@ -19,6 +21,7 @@ impl View {
             buffer,
             selection: Selection::point(0),
             top_line: 0,
+            left_col: 0,
             cursor_shape: CursorShape::Block,
         }
     }

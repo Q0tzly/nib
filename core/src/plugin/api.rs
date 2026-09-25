@@ -5,7 +5,7 @@ use wasmtime_wasi::{WasiCtxView, WasiView};
 
 use super::PluginData;
 use crate::buffer::Buffer;
-use crate::editor::State;
+use crate::editor::{ScrollAmount, State};
 use crate::grapheme;
 use crate::grid::CursorShape;
 use crate::history::UndoMode;
@@ -285,6 +285,19 @@ impl editor::HostView for PluginData {
                 })
                 .map(|(at, column)| (at as u64, column)),
         )
+    }
+
+    fn scroll(
+        &mut self,
+        view: Resource<ViewHandle>,
+        amount: editor::ScrollAmount,
+    ) -> HostResult<i32> {
+        let state = self.view_state(&view)?;
+        Ok(state.scroll(match amount {
+            editor::ScrollAmount::Lines(n) => ScrollAmount::Lines(n),
+            editor::ScrollAmount::HalfPage(n) => ScrollAmount::HalfPage(n),
+            editor::ScrollAmount::Page(n) => ScrollAmount::Page(n),
+        }))
     }
 
     fn set_cursor_shape(

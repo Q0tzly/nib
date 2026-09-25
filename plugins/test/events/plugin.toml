@@ -1,0 +1,11 @@
+name = "test-events"
+version = "0.0.0"
+api = "0.1"
+events = [
+    "buffer-opened",
+    "buffer-saved",
+    "buffer-changed",
+    "test-events.ping",
+    "test-events.loop",
+    "helix.mode_changed",
+]

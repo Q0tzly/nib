@@ -1,5 +1,5 @@
 use std::io::{self, Write};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyEventKind, KeyModifiers};
 use crossterm::{cursor, execute, terminal};
@@ -33,6 +33,16 @@ pub fn run(editor: &mut Editor) -> io::Result<()> {
             continue;
         }
 
+        // Wait for input, but only until the next timer is due.
+        if let Some(due) = editor.next_timer()
+            && !event::poll(due.saturating_duration_since(Instant::now()))?
+        {
+            editor.run_timers();
+            if editor.should_quit() {
+                return Ok(());
+            }
+            continue;
+        }
         handle(editor, event::read()?);
         // Handle everything already queued, then draw once.
         while event::poll(Duration::ZERO)? {

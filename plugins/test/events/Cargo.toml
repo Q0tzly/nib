@@ -1,7 +1,6 @@
 [package]
-name = "nib-plugin-helix"
-description = "Helix-style modal keymap for nib"
-version = "0.1.4"
+name = "nib-test-plugin-events"
+version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true

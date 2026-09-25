@@ -6,7 +6,7 @@ mod manifest;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -17,7 +17,8 @@ use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 
 use crate::Error;
 use crate::config::Settings;
-use crate::editor::{Editor, State};
+use crate::editor::{CORE_COMMANDS, Editor, State};
+use crate::events::Event;
 use crate::input::KeyEvent;
 use api::bindings;
 use api::bindings::exports::nib::plugin::guest::KeyResult;
@@ -39,6 +40,9 @@ const EPOCH_TICK: Duration = Duration::from_millis(10);
 const MAX_CRASHES: usize = 3;
 const CRASH_WINDOW: Duration = Duration::from_secs(60);
 const STDERR_CAPACITY: usize = 64 * 1024;
+/// At most this many events are delivered in one go, so plugins that keep
+/// answering each other's events cannot hang the editor.
+const MAX_EVENTS: usize = 1000;
 
 #[derive(Clone, Debug)]
 pub struct PluginOptions {
@@ -115,6 +119,9 @@ pub(crate) struct Plugins {
     /// costs nothing.
     runtime: Option<Runtime>,
     entries: Vec<Plugin>,
+    /// Plugins that failed in a call made from another plugin, with the
+    /// reason. They are restarted once the outermost call returns.
+    failures: Vec<(PluginId, String)>,
 }
 
 struct Runtime {
@@ -126,21 +133,22 @@ struct Runtime {
 /// Advances the engine's epoch while a plugin call runs, and sleeps
 /// otherwise, so an idle editor never wakes up for it.
 struct Ticker {
-    running: Arc<AtomicBool>,
+    /// Calls in progress; nested calls count too.
+    calls: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     thread: thread::Thread,
 }
 
 impl Ticker {
     fn start(engine: Engine) -> std::io::Result<Self> {
-        let running = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
         let stop = Arc::new(AtomicBool::new(false));
-        let (thread_running, thread_stop) = (running.clone(), stop.clone());
+        let (thread_calls, thread_stop) = (calls.clone(), stop.clone());
         let handle = thread::Builder::new()
             .name("nib-epoch".into())
             .spawn(move || {
                 while !thread_stop.load(Ordering::Relaxed) {
-                    if thread_running.load(Ordering::Acquire) {
+                    if thread_calls.load(Ordering::Acquire) > 0 {
                         thread::sleep(EPOCH_TICK);
                         engine.increment_epoch();
                     } else {
@@ -150,19 +158,20 @@ impl Ticker {
                 }
             })?;
         Ok(Self {
-            running,
+            calls,
             stop,
             thread: handle.thread().clone(),
         })
     }
 
     fn begin(&self) {
-        self.running.store(true, Ordering::Release);
-        self.thread.unpark();
+        if self.calls.fetch_add(1, Ordering::AcqRel) == 0 {
+            self.thread.unpark();
+        }
     }
 
     fn end(&self) {
-        self.running.store(false, Ordering::Release);
+        self.calls.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -183,7 +192,12 @@ struct Plugin {
     /// `[settings]` from its `plugins/<name>.toml`, as JSON.
     config: String,
     limits: Limits,
+    /// The kinds of events it gets.
+    subscriptions: Vec<String>,
+    /// Out of `Plugins` while a call runs: calling it again then would
+    /// re-enter it.
     instance: Option<Instance>,
+    in_call: bool,
     enabled: bool,
     crashes: Vec<Instant>,
     slow_calls: u32,
@@ -209,6 +223,8 @@ struct Instance {
 pub(crate) struct PluginData {
     /// The editor state, present only during a call.
     state: Option<State>,
+    /// The other plugins, present only during a call, so it can call them.
+    plugins: Option<Plugins>,
     plugin: PluginId,
     wasi: WasiCtx,
     table: ResourceTable,
@@ -295,7 +311,9 @@ impl Editor {
             component,
             config: settings.settings,
             limits,
+            subscriptions: manifest.events,
             instance: None,
+            in_call: false,
             enabled: true,
             crashes: Vec::new(),
             slow_calls: 0,
@@ -407,6 +425,7 @@ impl Editor {
         self.add_languages(&manifest, &Source::Dir(&dir))?;
         let plugin = &mut self.plugins.entries[id];
         plugin.version = manifest.version;
+        plugin.subscriptions = manifest.events;
         plugin.component = component;
         self.restart_plugin(id)
     }
@@ -469,6 +488,7 @@ impl Editor {
         let stderr = MemoryOutputPipe::new(STDERR_CAPACITY);
         let data = PluginData {
             state: None,
+            plugins: None,
             plugin: id,
             wasi: WasiCtx::builder().stderr(stderr.clone()).build(),
             table: ResourceTable::new(),
@@ -493,12 +513,13 @@ impl Editor {
         let result = match result {
             Ok(Ok(())) => Ok(()),
             Ok(Err(message)) => Err(message),
-            Err(err) => Err(self.describe_failure(id, &err)),
+            Err(err) => Err(describe_failure(&self.plugins.entries[id], &err)),
         };
         if let Err(message) = &result {
             self.plugins.entries[id].last_error = Some(message.clone());
             self.stop_plugin(id);
         }
+        self.handle_nested_failures();
         result
     }
 
@@ -512,52 +533,38 @@ impl Editor {
         // A stopped plugin has nothing to call and has not failed again.
         self.plugins.entries[id].instance.as_ref()?;
         let timeout = self.plugins.entries[id].limits.call;
-        match self.invoke(id, timeout, f) {
+        let result = self.invoke(id, timeout, f);
+        let value = match result {
             Ok(value) => Some(value),
             Err(err) => {
-                self.plugin_failed(id, &err);
+                let reason = describe_failure(&self.plugins.entries[id], &err);
+                self.plugin_failed(id, reason);
                 None
             }
-        }
+        };
+        self.handle_nested_failures();
+        value
     }
 
-    /// Lends the editor state to the plugin's store for the duration of `f`.
     fn invoke<R>(
         &mut self,
         id: PluginId,
         timeout: Duration,
         f: impl FnOnce(&bindings::Plugin, &mut Store<PluginData>) -> wasmtime::Result<R>,
     ) -> wasmtime::Result<R> {
-        let warn_after = self.plugins.options.warn_after;
-        let ticker = &self
-            .plugins
-            .runtime
-            .as_ref()
-            .expect("runtime exists")
-            .ticker;
-        let plugin = &mut self.plugins.entries[id];
-        let instance = plugin
-            .instance
-            .as_mut()
-            .ok_or_else(|| wasmtime::Error::msg("plugin is not running"))?;
-
-        instance.store.data_mut().state = self.state.take();
-        instance.store.set_epoch_deadline(ticks(timeout));
-        let started = Instant::now();
-        ticker.begin();
-        let result = f(&instance.bindings, &mut instance.store);
-        ticker.end();
-        let elapsed = started.elapsed();
-        self.state = instance.store.data_mut().state.take();
-
-        if elapsed > warn_after {
-            plugin.slow_calls += 1;
-        }
-        result
+        call_in(&mut self.plugins, &mut self.state, id, timeout, f)
     }
 
-    fn plugin_failed(&mut self, id: PluginId, err: &wasmtime::Error) {
-        let reason = self.describe_failure(id, err);
+    /// Restarts or disables the plugins that failed in calls from other
+    /// plugins.
+    fn handle_nested_failures(&mut self) {
+        while !self.plugins.failures.is_empty() {
+            let (id, reason) = self.plugins.failures.remove(0);
+            self.plugin_failed(id, reason);
+        }
+    }
+
+    fn plugin_failed(&mut self, id: PluginId, reason: String) {
         self.stop_plugin(id);
 
         let plugin = &mut self.plugins.entries[id];
@@ -590,17 +597,213 @@ impl Editor {
         self.state_mut().remove_plugin_parts(id);
     }
 
-    fn describe_failure(&self, id: PluginId, err: &wasmtime::Error) -> String {
-        if let Some(Trap::Interrupt) = err.downcast_ref::<Trap>() {
-            return "it took too long".into();
-        }
-        // A Rust plugin prints its panic message to stderr before trapping.
-        let panic = self.plugins.entries[id]
-            .instance
-            .as_ref()
-            .and_then(|instance| panic_message(&instance.stderr.contents()));
-        panic.unwrap_or_else(|| format!("{err}"))
+    /// Calls a command a plugin registered, or a core command.
+    pub fn call_command(&mut self, name: &str, args: &str) -> Result<String, String> {
+        let command = self
+            .state()
+            .commands
+            .iter()
+            .find(|command| command.name == name)
+            .cloned();
+        let result = match command {
+            Some(command) => self
+                .call_plugin(command.owner, |bindings, store| {
+                    bindings
+                        .nib_plugin_guest()
+                        .call_run_command(store, &command.short, args)
+                })
+                .unwrap_or_else(|| Err(format!("{name}: the plugin is not running"))),
+            None => self.state_mut().run_command(name, args),
+        };
+        self.deliver_events();
+        result
     }
+
+    /// Every command, core and registered, with its description.
+    pub fn commands(&self) -> Vec<(String, String)> {
+        let core = CORE_COMMANDS
+            .iter()
+            .map(|&(name, description)| (name.to_string(), description.to_string()));
+        let registered = self
+            .state()
+            .commands
+            .iter()
+            .map(|command| (command.name.clone(), command.description.clone()));
+        core.chain(registered).collect()
+    }
+
+    /// Delivers the queued events, and the ones plugins emit meanwhile, in
+    /// order.
+    pub fn deliver_events(&mut self) -> bool {
+        let mut delivered = 0;
+        while let Some((target, event)) = self.state_mut().pop_event() {
+            if delivered == MAX_EVENTS {
+                let state = self.state_mut();
+                let dropped = 1 + state.events.len();
+                state.events.clear();
+                state.message = Some(format!(
+                    "dropped {dropped} events: plugins sent more than {MAX_EVENTS} at once"
+                ));
+                break;
+            }
+            delivered += 1;
+            let receivers: Vec<PluginId> = match target {
+                Some(id) => vec![id],
+                None => (0..self.plugins.entries.len())
+                    .filter(|&id| {
+                        self.plugins.entries[id]
+                            .subscriptions
+                            .iter()
+                            .any(|kind| kind == event.kind())
+                    })
+                    .collect(),
+            };
+            for id in receivers {
+                self.call_plugin(id, |bindings, store| {
+                    bindings
+                        .nib_plugin_guest()
+                        .call_on_event(store, &api::wit_event(&event))
+                });
+            }
+        }
+        delivered > 0
+    }
+
+    /// When the next timer is due.
+    pub fn next_timer(&self) -> Option<Instant> {
+        self.state().timers.iter().map(|timer| timer.due).min()
+    }
+
+    /// Sends the timers that are due to their plugins.
+    pub fn run_timers(&mut self) {
+        let due = self.state_mut().take_due_timers(Instant::now());
+        for timer in due {
+            self.state_mut()
+                .push_event(Some(timer.owner), Event::Timer(timer.id));
+        }
+        self.after_plugins_ran();
+    }
+}
+
+/// Lends the editor state and the other plugins to plugin `id`'s store for
+/// the duration of `f`. Its instance is out of `plugins` meanwhile, so a
+/// call back into it finds it busy.
+fn call_in<R>(
+    plugins: &mut Plugins,
+    state: &mut Option<State>,
+    id: PluginId,
+    timeout: Duration,
+    f: impl FnOnce(&bindings::Plugin, &mut Store<PluginData>) -> wasmtime::Result<R>,
+) -> wasmtime::Result<R> {
+    let mut instance = plugins.entries[id]
+        .instance
+        .take()
+        .ok_or_else(|| wasmtime::Error::msg("plugin is not running"))?;
+    plugins.entries[id].in_call = true;
+    let warn_after = plugins.options.warn_after;
+    plugins
+        .runtime
+        .as_ref()
+        .expect("runtime exists")
+        .ticker
+        .begin();
+
+    let data = instance.store.data_mut();
+    data.state = state.take();
+    data.plugins = Some(std::mem::take(plugins));
+    instance.store.set_epoch_deadline(ticks(timeout));
+    let started = Instant::now();
+    let result = f(&instance.bindings, &mut instance.store);
+    let elapsed = started.elapsed();
+    let data = instance.store.data_mut();
+    *state = data.state.take();
+    *plugins = data.plugins.take().expect("plugins come back after a call");
+
+    plugins
+        .runtime
+        .as_ref()
+        .expect("runtime exists")
+        .ticker
+        .end();
+    let plugin = &mut plugins.entries[id];
+    plugin.in_call = false;
+    if elapsed > warn_after {
+        plugin.slow_calls += 1;
+    }
+    plugin.instance = Some(instance);
+    result
+}
+
+impl PluginData {
+    /// Calls `command` of plugin `owner` from within this plugin's call,
+    /// passing on what this plugin was lent.
+    pub(crate) fn call_plugin_command(
+        &mut self,
+        owner: PluginId,
+        name: &str,
+        short: &str,
+        args: &str,
+    ) -> wasmtime::Result<Result<String, String>> {
+        let plugins = self
+            .plugins
+            .as_mut()
+            .ok_or_else(|| wasmtime::Error::msg("plugins are only reachable during a call"))?;
+        let plugin = &plugins.entries[owner];
+        if plugin.in_call {
+            return Ok(Err(format!(
+                "{name}: {} is in a call already and cannot be called back",
+                plugin.name
+            )));
+        }
+        if plugin.instance.is_none() {
+            return Ok(Err(format!("{name}: {} is not running", plugin.name)));
+        }
+        let timeout = plugin.limits.call;
+        let result = call_in(
+            plugins,
+            &mut self.state,
+            owner,
+            timeout,
+            |bindings, store| {
+                bindings
+                    .nib_plugin_guest()
+                    .call_run_command(store, short, args)
+            },
+        );
+        match result {
+            Ok(result) => Ok(result),
+            Err(err) => {
+                let plugins = self.plugins.as_mut().expect("still lent");
+                let plugin = &mut plugins.entries[owner];
+                let reason = describe_failure(plugin, &err);
+                let message = format!("{name}: {} failed: {reason}", plugin.name);
+                plugin.instance = None;
+                plugins.failures.push((owner, reason));
+                Ok(Err(message))
+            }
+        }
+    }
+
+    /// The name of this plugin, for names it registers or emits.
+    pub(crate) fn plugin_name(&self) -> wasmtime::Result<&str> {
+        let plugins = self
+            .plugins
+            .as_ref()
+            .ok_or_else(|| wasmtime::Error::msg("plugins are only reachable during a call"))?;
+        Ok(&plugins.entries[self.plugin].name)
+    }
+}
+
+fn describe_failure(plugin: &Plugin, err: &wasmtime::Error) -> String {
+    if let Some(Trap::Interrupt) = err.downcast_ref::<Trap>() {
+        return "it took too long".into();
+    }
+    // A Rust plugin prints its panic message to stderr before trapping.
+    let panic = plugin
+        .instance
+        .as_ref()
+        .and_then(|instance| panic_message(&instance.stderr.contents()));
+    panic.unwrap_or_else(|| format!("{err}"))
 }
 
 /// Finds the message in Rust's "thread '...' panicked at file:line:col:"

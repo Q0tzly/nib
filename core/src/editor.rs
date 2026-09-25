@@ -1,5 +1,6 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use ropey::Rope;
 use tree_sitter::Tree;
@@ -7,6 +8,7 @@ use tree_sitter::Tree;
 use crate::Error;
 use crate::buffer::Buffer;
 use crate::config::{Config, PluginConfig, Settings};
+use crate::events::{Command, Event, Timer};
 use crate::input::{KeyCode, KeyEvent};
 use crate::layout;
 use crate::plugin::{PluginId, Plugins};
@@ -36,6 +38,13 @@ pub(crate) struct State {
     /// Popups, drawn in the order they were opened.
     pub popups: Vec<Popup>,
     pub last_popup_id: u32,
+    /// Events waiting for the current call to end, with the plugin they
+    /// are for, or `None` for every plugin that listens to their kind.
+    pub events: VecDeque<(Option<PluginId>, Event)>,
+    /// Commands plugins registered.
+    pub commands: Vec<Command>,
+    pub timers: Vec<Timer>,
+    pub last_timer_id: u64,
     /// Views of buffers not shown, so switching back restores the selection
     /// and scroll position.
     pub hidden_views: HashMap<usize, View>,
@@ -75,9 +84,11 @@ impl State {
         {
             self.buffers[0] = buffer;
             self.view = View::new(0);
+            self.push_event(None, Event::BufferOpened(0));
         } else {
             self.buffers.push(buffer);
             self.switch_to(self.buffers.len() - 1);
+            self.push_event(None, Event::BufferOpened(self.buffers.len() - 1));
         }
         Ok(())
     }
@@ -220,8 +231,9 @@ impl State {
         };
         match name {
             "buffer.save" => {
-                let buffer = &mut self.buffers[self.view.buffer];
-                buffer.save().map_err(|err| err.to_string())?;
+                let index = self.view.buffer;
+                self.buffers[index].save().map_err(|err| err.to_string())?;
+                self.push_event(None, Event::BufferSaved(index));
             }
             "buffer.open" => {
                 let path = args["path"]
@@ -261,6 +273,46 @@ impl State {
         for buffer in &mut self.buffers {
             buffer.remove_decorations(plugin);
         }
+        self.commands.retain(|command| command.owner != plugin);
+        self.timers.retain(|timer| timer.owner != plugin);
+        self.events.retain(|(target, _)| *target != Some(plugin));
+    }
+
+    /// Queues an event behind the buffer changes made so far, so events
+    /// arrive in the order things happened.
+    pub fn push_event(&mut self, target: Option<PluginId>, event: Event) {
+        self.flush_changes();
+        self.events.push_back((target, event));
+    }
+
+    pub fn pop_event(&mut self) -> Option<(Option<PluginId>, Event)> {
+        self.flush_changes();
+        self.events.pop_front()
+    }
+
+    /// Turns the changes buffers logged into `buffer-changed` events.
+    fn flush_changes(&mut self) {
+        for (index, buffer) in self.buffers.iter_mut().enumerate() {
+            for (version, changes) in buffer.change_log.drain(..) {
+                self.events.push_back((
+                    None,
+                    Event::BufferChanged {
+                        buffer: index,
+                        version,
+                        changes,
+                    },
+                ));
+            }
+        }
+    }
+
+    /// The timers that are due, earliest first, removed from the list.
+    pub fn take_due_timers(&mut self, now: Instant) -> Vec<Timer> {
+        let (mut due, waiting): (Vec<Timer>, Vec<Timer>) =
+            self.timers.drain(..).partition(|timer| timer.due <= now);
+        self.timers = waiting;
+        due.sort_by_key(|timer| (timer.due, timer.id));
+        due
     }
 }
 
@@ -294,6 +346,18 @@ pub struct Editor {
 
 const LENT: &str = "editor state is only lent during plugin calls";
 
+/// The commands the core runs itself, with their descriptions.
+pub(crate) const CORE_COMMANDS: &[(&str, &str)] = &[
+    ("buffer.save", "Save the current buffer"),
+    ("buffer.open", "Open a file: {\"path\": string}"),
+    ("buffer.next", "Show the next buffer"),
+    ("buffer.previous", "Show the previous buffer"),
+    (
+        "editor.quit",
+        "Quit; {\"force\": true} drops unsaved changes",
+    ),
+];
+
 impl Default for Editor {
     /// Starts with an empty buffer that has no path.
     fn default() -> Self {
@@ -313,6 +377,10 @@ impl Default for Editor {
                 last_panel_id: 0,
                 popups: Vec::new(),
                 last_popup_id: 0,
+                events: VecDeque::new(),
+                commands: Vec::new(),
+                timers: Vec::new(),
+                last_timer_id: 0,
                 hidden_views: HashMap::new(),
                 languages: Languages::default(),
                 theme: Theme::default(),
@@ -363,7 +431,12 @@ impl Editor {
     /// buffer, so opening a file shows it before its highlighting. Returns
     /// whether the screen needs drawing again.
     pub fn catch_up(&mut self) -> bool {
-        self.state_mut().update_syntax()
+        let delivered = self.deliver_events();
+        let parsed = self.state_mut().update_syntax();
+        if delivered {
+            self.scroll_to_cursor();
+        }
+        delivered || parsed
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {
@@ -412,6 +485,13 @@ impl Editor {
         } else {
             self.send_to_plugins(key);
         }
+        self.after_plugins_ran();
+    }
+
+    /// Delivers the events plugins caused, then brings the syntax tree and
+    /// the scroll position up to date with what they did.
+    pub(crate) fn after_plugins_ran(&mut self) {
+        self.deliver_events();
         self.state_mut().update_syntax();
         self.scroll_to_cursor();
     }
@@ -532,7 +612,9 @@ impl Editor {
     /// Saves every modified buffer. Returns what could not be saved.
     fn save_all(&mut self) -> Result<(), Vec<String>> {
         let mut failures = Vec::new();
-        for buffer in &mut self.state_mut().buffers {
+        let state = self.state_mut();
+        for index in 0..state.buffers.len() {
+            let buffer = &mut state.buffers[index];
             if !buffer.is_modified() {
                 continue;
             }
@@ -540,8 +622,9 @@ impl Editor {
                 failures.push("[scratch] has no path".to_string());
                 continue;
             };
-            if let Err(err) = buffer.save() {
-                failures.push(format!("{path}: {err}"));
+            match buffer.save() {
+                Ok(()) => state.push_event(None, Event::BufferSaved(index)),
+                Err(err) => failures.push(format!("{path}: {err}")),
             }
         }
         if failures.is_empty() {

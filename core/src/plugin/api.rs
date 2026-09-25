@@ -1,13 +1,15 @@
 //! Host side of `nib:plugin`: what plugins can call.
 
 use std::ops::Range as ByteRange;
+use std::time::{Duration, Instant};
 
 use wasmtime::component::Resource;
 use wasmtime_wasi::{WasiCtxView, WasiView};
 
 use super::PluginData;
 use crate::buffer::Buffer;
-use crate::editor::{ScrollAmount, State};
+use crate::editor::{CORE_COMMANDS, ScrollAmount, State};
+use crate::events::{Command, Event, Timer};
 use crate::grapheme;
 use crate::grid::CursorShape;
 use crate::history::UndoMode;
@@ -35,7 +37,7 @@ pub(crate) mod bindings {
 }
 
 use bindings::nib::plugin::{
-    commands, editor, input, settings, syntax, types as wit, ui as wit_ui,
+    commands, editor, events, input, settings, syntax, timers, types as wit, ui as wit_ui,
 };
 
 /// A buffer as seen by a plugin. The resource's rep is the buffer index.
@@ -103,6 +105,11 @@ impl wit::Host for PluginData {}
 impl editor::Host for PluginData {
     fn active_view(&mut self) -> HostResult<Resource<ViewHandle>> {
         Ok(Resource::new_own(0))
+    }
+
+    fn buffers(&mut self) -> HostResult<Vec<Resource<BufferHandle>>> {
+        let count = self.state()?.buffers.len();
+        Ok((0..count as u32).map(Resource::new_own).collect())
     }
 }
 
@@ -466,8 +473,112 @@ impl input::Host for PluginData {
 }
 
 impl commands::Host for PluginData {
+    fn register(&mut self, name: String, description: String) -> HostResult<()> {
+        if name.is_empty() || name.contains(char::is_whitespace) {
+            return Err(wasmtime::Error::msg(format!(
+                "command name {name:?} must be a word"
+            )));
+        }
+        let owner = self.plugin;
+        let full = format!("{}.{name}", self.plugin_name()?);
+        let commands = &mut self.state()?.commands;
+        commands.retain(|command| command.name != full);
+        commands.push(Command {
+            owner,
+            name: full,
+            short: name,
+            description,
+        });
+        Ok(())
+    }
+
     fn call(&mut self, name: String, args: String) -> HostResult<Result<String, String>> {
-        Ok(self.state()?.run_command(&name, &args))
+        let state = self.state()?;
+        match state.commands.iter().find(|command| command.name == name) {
+            Some(command) => {
+                let (owner, short) = (command.owner, command.short.clone());
+                self.call_plugin_command(owner, &name, &short, &args)
+            }
+            None => Ok(state.run_command(&name, &args)),
+        }
+    }
+
+    fn all(&mut self) -> HostResult<Vec<(String, String)>> {
+        let core = CORE_COMMANDS
+            .iter()
+            .map(|&(name, description)| (name.to_string(), description.to_string()));
+        let registered = self
+            .state()?
+            .commands
+            .iter()
+            .map(|command| (command.name.clone(), command.description.clone()));
+        Ok(core.chain(registered).collect())
+    }
+}
+
+impl events::Host for PluginData {
+    fn emit(&mut self, name: String, data: String) -> HostResult<()> {
+        let name = format!("{}.{name}", self.plugin_name()?);
+        self.state()?.push_event(None, Event::Custom { name, data });
+        Ok(())
+    }
+}
+
+impl timers::Host for PluginData {
+    fn set(&mut self, ms: u32) -> HostResult<u64> {
+        let owner = self.plugin;
+        let state = self.state()?;
+        state.last_timer_id += 1;
+        let id = state.last_timer_id;
+        state.timers.push(Timer {
+            id,
+            owner,
+            due: Instant::now() + Duration::from_millis(u64::from(ms)),
+        });
+        Ok(id)
+    }
+
+    fn cancel(&mut self, id: u64) -> HostResult<()> {
+        let owner = self.plugin;
+        self.state()?
+            .timers
+            .retain(|timer| !(timer.id == id && timer.owner == owner));
+        Ok(())
+    }
+}
+
+/// An event as a plugin gets it, with handles to the buffers it names.
+pub(crate) fn wit_event(event: &Event) -> events::Event {
+    let buffer = |index: usize| Resource::new_own(index as u32);
+    let offset = |o: usize| o as u64;
+    match event {
+        Event::BufferOpened(index) => events::Event::BufferOpened(buffer(*index)),
+        Event::BufferSaved(index) => events::Event::BufferSaved(buffer(*index)),
+        Event::BufferChanged {
+            buffer: index,
+            version,
+            changes,
+        } => events::Event::BufferChanged(events::BufferChange {
+            buffer: buffer(*index),
+            version: *version,
+            changes: changes
+                .iter()
+                .map(|change| events::TextChange {
+                    start: offset(change.start),
+                    end: offset(change.end),
+                    start_line: change.start_line as u32,
+                    start_column: change.start_column as u32,
+                    end_line: change.end_line as u32,
+                    end_column: change.end_column as u32,
+                    text: change.text.clone(),
+                })
+                .collect(),
+        }),
+        Event::Custom { name, data } => events::Event::Custom(events::CustomEvent {
+            name: name.clone(),
+            data: data.clone(),
+        }),
+        Event::Timer(id) => events::Event::Timer(*id),
     }
 }
 

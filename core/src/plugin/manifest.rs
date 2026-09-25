@@ -16,6 +16,9 @@ pub(crate) struct Manifest {
     pub api: String,
     #[serde(default)]
     pub languages: Vec<LanguageManifest>,
+    /// The kinds of events the plugin gets, e.g. "buffer-changed".
+    #[serde(default)]
+    pub events: Vec<String>,
 }
 
 /// A language the plugin provides: a tree-sitter grammar as WebAssembly and
@@ -52,6 +55,11 @@ pub(crate) fn parse(text: &str, origin: &str) -> Result<Manifest, Error> {
             "name {:?} must be lowercase letters, digits, and '-'",
             manifest.name
         )));
+    }
+    // Command names start with the plugin's name, so these would pass for
+    // core commands.
+    if ["buffer", "editor", "view"].contains(&manifest.name.as_str()) {
+        return Err(fail(format!("name {:?} is reserved", manifest.name)));
     }
     Ok(manifest)
 }

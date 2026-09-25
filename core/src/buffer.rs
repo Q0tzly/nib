@@ -7,6 +7,7 @@ use ropey::Rope;
 use crate::Error;
 use crate::change::Assoc;
 use crate::change::{ChangeSet, Edit};
+use crate::events::{TextChange, text_changes};
 use crate::grapheme;
 use crate::history::{History, UndoMode};
 use crate::plugin::PluginId;
@@ -42,6 +43,9 @@ pub struct Buffer {
     pub(crate) syntax: Option<BufferSyntax>,
     /// Sorted by start, so drawing can skip to the visible ones.
     pub(crate) decorations: Vec<Decoration>,
+    /// Changes not yet turned into events: the version after each, and
+    /// what it did.
+    pub(crate) change_log: Vec<(u64, Vec<TextChange>)>,
 }
 
 impl Default for Buffer {
@@ -71,6 +75,7 @@ impl Buffer {
             saved_state: 0,
             syntax: None,
             decorations: Vec::new(),
+            change_log: Vec::new(),
         }
     }
 
@@ -254,8 +259,10 @@ impl Buffer {
             let new_end = (old_end + text.len_bytes()).saturating_sub(self.text.len_bytes());
             syntax.edit(&self.text, &text, first.start, old_end, new_end);
         }
+        let logged = text_changes(&self.text, std::slice::from_ref(&changes));
         self.text = text;
         self.version += 1;
+        self.change_log.push((self.version, logged));
         self.map_decorations(std::slice::from_ref(&changes));
         self.history.record(
             changes.clone(),
@@ -271,8 +278,11 @@ impl Buffer {
     }
 
     pub fn undo(&mut self) -> Option<Change> {
+        let before = self.text.clone();
         let (changes, selection) = self.history.undo(&mut self.text)?;
         self.version += 1;
+        self.change_log
+            .push((self.version, text_changes(&before, &changes)));
         self.map_decorations(&changes);
         if let Some(syntax) = &mut self.syntax {
             syntax.invalidate();
@@ -281,8 +291,11 @@ impl Buffer {
     }
 
     pub fn redo(&mut self) -> Option<Change> {
+        let before = self.text.clone();
         let (changes, selection) = self.history.redo(&mut self.text)?;
         self.version += 1;
+        self.change_log
+            .push((self.version, text_changes(&before, &changes)));
         self.map_decorations(&changes);
         if let Some(syntax) = &mut self.syntax {
             syntax.invalidate();

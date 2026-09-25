@@ -14,6 +14,7 @@ use std::cell::RefCell;
 use doc::{Doc, FindKind};
 use nib_plugin::exports::nib::plugin::guest::{Guest, KeyResult};
 use nib_plugin::nib::plugin::editor::{ScrollAmount, View};
+use nib_plugin::nib::plugin::events::{self, Event};
 use nib_plugin::nib::plugin::types::{
     CursorShape, Edit, KeyCode, KeyEvent, Modifiers, SelRange, Selection, Span, UndoMode,
 };
@@ -129,6 +130,12 @@ impl Guest for Plugin {
     fn handle_key(ev: KeyEvent) -> KeyResult {
         HELIX.with_borrow_mut(|helix| helix.handle_key(ev))
     }
+
+    fn run_command(name: String, _args: String) -> Result<String, String> {
+        Err(format!("no command {name}"))
+    }
+
+    fn on_event(_ev: Event) {}
 }
 
 nib_plugin::export!(Plugin);
@@ -170,13 +177,15 @@ impl Helix {
 
     fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
-        let (label, style, shape) = match mode {
-            Mode::Normal => (" NOR ", "ui.mode.normal", CursorShape::Block),
-            Mode::Select => (" SEL ", "ui.mode.select", CursorShape::Block),
-            Mode::Insert => (" INS ", "ui.mode.insert", CursorShape::Bar),
+        let (name, label, style, shape) = match mode {
+            Mode::Normal => ("normal", " NOR ", "ui.mode.normal", CursorShape::Block),
+            Mode::Select => ("select", " SEL ", "ui.mode.select", CursorShape::Block),
+            Mode::Insert => ("insert", " INS ", "ui.mode.insert", CursorShape::Bar),
         };
         editor::active_view().set_cursor_shape(shape);
         ui::set_status("mode", Side::Left, 0, &[span(label, style)]);
+        // For other plugins, such as a status line that shows the mode.
+        events::emit("mode_changed", &format!("\"{name}\""));
     }
 
     /// Normal and select mode. Returns whether the key was used.

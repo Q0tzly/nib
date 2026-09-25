@@ -117,6 +117,8 @@ interface editor {
     }
 
     active-view: func() -> view;
+    /// Every open buffer, e.g. for a plugin enabled after files were opened.
+    buffers: func() -> list<buffer>;
 }
 
 interface input {
@@ -128,14 +130,76 @@ interface input {
 }
 
 interface commands {
-    /// Runs a command by its full name. Arguments and the result are JSON.
+    /// Registers the command `<plugin>.<name>`, where `<plugin>` is this
+    /// plugin's name. Calls reach this plugin's `run-command` with `name`.
+    /// Registering a name again replaces its description.
+    register: func(name: string, description: string);
+
+    /// Runs a command by its full name and waits for its result. Arguments
+    /// and the result are JSON. Calling a plugin that is already in a call,
+    /// such as the caller itself, is an error.
     ///
     /// Core commands:
     /// - `buffer.save`: saves the current buffer.
     /// - `buffer.open` `{"path": string}`: opens a file in the view.
+    /// - `buffer.next`, `buffer.previous`: shows another buffer.
     /// - `editor.quit` `{"force": bool}`: quits; without `force`, fails when
     ///   buffers have unsaved changes.
     call: func(name: string, args: string) -> result<string, string>;
+
+    /// Every command, core and registered, with its description.
+    all: func() -> list<tuple<string, string>>;
+}
+
+/// Events reach `guest.on-event` after the call that caused them, in the
+/// order they happened. A plugin gets the kinds listed in `events` in its
+/// plugin.toml, and its own timers.
+interface events {
+    use types.{offset};
+    use editor.{buffer};
+
+    /// One change, at positions in the text as it is when the changes
+    /// before it in the list have been applied. Lines and columns count
+    /// from 0; columns are in bytes.
+    record text-change {
+        start: offset,
+        end: offset,
+        start-line: u32,
+        start-column: u32,
+        end-line: u32,
+        end-column: u32,
+        text: string,
+    }
+
+    /// Applying `changes` in order turns the text before into the text at
+    /// `version`, as LSP's `didChange` does.
+    record buffer-change {
+        buffer: buffer,
+        version: u64,
+        changes: list<text-change>,
+    }
+
+    /// An event a plugin emitted; `name` has the plugin's name in front.
+    record custom-event { name: string, data: string }
+
+    variant event {
+        buffer-opened(buffer),
+        buffer-saved(buffer),
+        buffer-changed(buffer-change),
+        custom(custom-event),
+        /// The id `timers.set` returned.
+        timer(u64),
+    }
+
+    /// Emits the custom event `<plugin>.<name>` with JSON `data`.
+    emit: func(name: string, data: string);
+}
+
+interface timers {
+    /// Sends `timer(id)` once, `ms` milliseconds from now, and returns `id`.
+    /// Timers are checked between keys, never during a call.
+    set: func(ms: u32) -> u64;
+    cancel: func(id: u64);
 }
 
 interface ui {
@@ -239,6 +303,7 @@ interface syntax {
 
 interface guest {
     use types.{key-event};
+    use events.{event};
 
     enum key-result {
         handled,
@@ -252,6 +317,12 @@ interface guest {
     /// A key reached one of this plugin's input layers. The core's menu key
     /// (Ctrl-g by default) never arrives.
     handle-key: func(ev: key-event) -> key-result;
+
+    /// One of this plugin's registered commands was called, by the name it
+    /// was registered with.
+    run-command: func(name: string, args: string) -> result<string, string>;
+
+    on-event: func(ev: event);
 }
 
 world plugin {
@@ -261,6 +332,8 @@ world plugin {
     import ui;
     import settings;
     import syntax;
+    import events;
+    import timers;
 
     export guest;
 }

@@ -1,8 +1,9 @@
 //! Test plugin that breaks on purpose, to check that the host survives it.
 
 use nib_plugin::exports::nib::plugin::guest::{Guest, KeyResult};
-use nib_plugin::nib::plugin::input;
+use nib_plugin::nib::plugin::events::Event;
 use nib_plugin::nib::plugin::types::{KeyCode, KeyEvent};
+use nib_plugin::nib::plugin::{commands, input};
 
 struct Misbehave;
 
@@ -12,6 +13,8 @@ impl Guest for Misbehave {
             return Err("asked to fail".into());
         }
         input::push_layer();
+        commands::register("panic", "test: panics");
+        commands::register("call-back", "test: calls test-events.echo");
         Ok(())
     }
 
@@ -29,6 +32,17 @@ impl Guest for Misbehave {
             _ => KeyResult::Pass,
         }
     }
+
+    fn run_command(name: String, _args: String) -> Result<String, String> {
+        match name.as_str() {
+            "panic" => panic!("asked to panic"),
+            // Called from test-events, this calls it back while it waits.
+            "call-back" => commands::call("test-events.echo", "back"),
+            _ => Err(format!("no command {name}")),
+        }
+    }
+
+    fn on_event(_ev: Event) {}
 }
 
 nib_plugin::export!(Misbehave);

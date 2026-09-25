@@ -2,6 +2,7 @@
 //! "^C". Escape removes its input layer.
 
 use nib_plugin::exports::nib::plugin::guest::{Guest, KeyResult};
+use nib_plugin::nib::plugin::events::Event;
 use nib_plugin::nib::plugin::types::{Edit, KeyCode, KeyEvent, Modifiers, UndoMode};
 use nib_plugin::nib::plugin::{editor, input};
 
@@ -31,6 +32,12 @@ impl Guest for Insert {
             KeyResult::Pass
         }
     }
+
+    fn run_command(name: String, _args: String) -> Result<String, String> {
+        Err(format!("no command {name}"))
+    }
+
+    fn on_event(_ev: Event) {}
 }
 
 fn insert(text: &str) -> bool {

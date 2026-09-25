@@ -73,7 +73,7 @@ interface guest {
     /// 入力スタックに積んだ層にキーが届いたとき
     handle-key: func(ev: key-event) -> key-result;
 
-    /// 自分が登録したコマンドが呼ばれたとき。引数と戻り値は JSON
+    /// 自分が登録したコマンドが呼ばれたとき。name は登録したときの名前。引数と戻り値は JSON
     run-command: func(name: string, args: string) -> result<string, string>;
 
     /// 購読したイベント
@@ -214,12 +214,18 @@ interface syntax {
 ## コマンド
 
 - `commands.register(name, description)` で登録する。登録名の前には、マニフェストの `name` が自動で付く（`move_next_word` → `helix.move_next_word`）。
+  - 呼ばれると、登録したプラグインの `run-command(name, args)` に、登録したときの名前（`move_next_word`）で届く。
+  - 同じ名前をもう一度登録すると、説明を差し替える。プラグインが止まると登録は消える。
 - `buffer.`、`editor.`、`view.` で始まる名前はコア用に予約する。
 - `commands.call(name, args)` で呼ぶ。
   - 引数と戻り値は JSON 文字列。
   - 呼び出しは同期的で、戻り値をその場で受け取れる。
   - 呼び出し先がすでに呼び出し中のプラグイン（呼び出し元自身や、その呼び出し元）なら、再入になるのでエラーを返す。
+  - 呼び出し先のプラグインが落ちたときは、呼び出し元にはエラーが返る。落ちたプラグインの再起動は、いちばん外側の呼び出しが終わってから行う。
+- `commands.all()` で、登録済みのコマンドの名前と説明を得る（コマンドの一覧や補完に使う）。
 - コアのコマンドの例: `buffer.open`、`buffer.save`、`buffer.close`、`editor.quit`、`view.split`。
+
+呼び出しを同期にできるのは、呼び出し中はエディタの状態とプラグインの一覧をそのプラグインのストアに貸しているため。呼び出し先のプラグインへは、貸したものをそのまま又貸しする（[architecture.md](architecture.md) の「プラグインの実行」）。
 
 JSON を選んだのは、WIT に再帰する型がなく、任意の値の木を型で表せないため。どの言語にも JSON の実装はある。
 
@@ -232,21 +238,45 @@ JSON を選んだのは、WIT に再帰する型がなく、任意の値の木�
 
 ## イベント
 
+- イベントは guest の `on-event(ev)` で届く。
 - プラグインは、マニフェストの `events` に書いた種類のイベントだけを受け取る。全イベントを全プラグインに配ることはしない。
+
+```toml
+events = ["buffer-opened", "buffer-changed", "helix.mode_changed"]
+```
+
 - 主なイベント:
 
-| イベント | 内容 |
-|----------|------|
-| `buffer-opened` / `buffer-closed` / `buffer-saved` | バッファの出入り |
-| `buffer-changed` | 適用された `edit` の列と、変更前後のバージョン。LSP の差分同期に使えるよう、変更前の行と列も付ける |
-| `selection-changed` | 選択が変わった |
-| `paste` | 貼り付けられた文字列 |
-| `timer` | `timers.set` で予約した時刻になった |
-| `process-output` / `process-exit` | 起動した外部プロセスの出力と終了 |
-| `custom` | 他のプラグインが `events.emit(name, json)` で出したもの |
+| イベント | 内容 | 届く先 |
+|----------|------|--------|
+| `buffer-opened` / `buffer-saved` | バッファを開いた・保存した | `events` に書いたプラグイン |
+| `buffer-changed` | バッファの変更。変更後のバージョンと、変更の列 | 同上 |
+| `<plugin>.<name>` | プラグインが `events.emit(name, json)` で出したもの（custom イベント） | 同上 |
+| `timer` | `timers.set` で予約した時間がたった | 予約したプラグインだけ |
+| `process-output` / `process-exit` | 起動した外部プロセスの出力と終了（M3.2） | 起動したプラグインだけ |
+| `buffer-closed`、`selection-changed`、`paste` | 必要になったときに足す | |
 
-- `custom` は、コマンドと対になる仕組み。コマンドは「誰かに頼む」、`custom` イベントは「起きたことを知らせる」。たとえばキーマッププラグインがモードの変化を知らせ、ステータスラインのプラグインがそれを表示する。
-- イベントは、それを起こした呼び出しが終わってから、起きた順に届ける。
+- `buffer-changed` の変更の列は、先頭から順に 1 つずつ適用していけば変更後のテキストになるように並べる。LSP の `didChange` の `contentChanges` と同じ考え方で、変更ごとに、その時点のテキストでの行と列（バイト数）を付ける。LSP プラグインは、これをそのまま差分の同期に使える。
+  - 1 回の `apply` の編集は、後ろから順に並べる。後ろの変更は前の位置を動かさないので、どれも変更前のテキストの位置のまま使える。
+  - undo と redo も同じ形で届く。
+- custom イベントの名前には、出したプラグインの名前が自動で付く（`events.emit("mode_changed", ...)` → `helix.mode_changed`）。custom イベントはコマンドと対になる仕組み。コマンドは「誰かに頼む」、custom イベントは「起きたことを知らせる」。たとえばキーマッププラグインがモードの変化を知らせ、ステータスラインのプラグインがそれを表示する。
+- イベントは、それを起こした呼び出しが終わってから、起きた順に届ける。イベントを受けたプラグインが出したイベントも、同じ順番の最後に並ぶ。
+  - 1 回にさばくイベントは 1,000 個までにする。プラグイン同士がイベントを投げ合って止まらなくなったときに、エディタが固まらないようにするため。超えた分は捨てて、メッセージで知らせる。
+- プラグインより前に開いたバッファの `buffer-opened` も、読み込んだあとに届く。起動時は、ファイルを開き、プラグインを読み込んでから、たまったイベントを配るため。途中で有効にしたプラグインは、`editor.buffers()` で開いているバッファを調べる。
+
+## タイマー
+
+```wit
+interface timers {
+    /// ms ミリ秒後に 1 回だけ timer(id) のイベントを届ける
+    set: func(ms: u32) -> u64;
+    cancel: func(id: u64);
+}
+```
+
+- 繰り返したいときは、イベントを受けたときに予約し直す。
+- タイマーの時刻は、キー入力などを処理していないときに確かめる。キーの処理が長引いても、処理中に割り込んで届けることはない。
+- プラグインが止まると、そのプラグインのタイマーは消える。
 
 ## UI
 
@@ -322,19 +352,18 @@ set-decorations: func(buf: borrow<buffer>, namespace: string, decorations: list<
 - **Rust**（`sdk/rust`、クレート `nib-plugin`）: wit-bindgen の生成コードを包み、`Plugin` トレイトと `export!` マクロを提供する。`wasm32-wasip2` 向けにビルドするだけで、コンポーネントが出来上がる。
 - **Go**（`sdk/go`）: M1 のあとに着手する。TinyGo と wit-bindgen-go を使う想定で、本家 Go の wasip2 対応の状況は着手時に確認する。
 
-## M1 で使う範囲
+## 作る順番
 
-Helix 風キーマップで nib 自身を編集するのに必要なものだけを、先に作る。
+Helix 風キーマップで nib 自身を編集するのに必要なものから作る。
 
-| 範囲 | M1 |
-|------|----|
-| `editor`（バッファ、選択、`apply`、undo、検索、縦移動、スクロール、カーソルの形） | ○ |
-| `input`（入力スタック） | ○ |
-| `commands`（登録と呼び出し、`buffer.open` / `buffer.save` / `editor.quit`） | ○ |
-| `ui.set-status`、`ui.panel` | ○ |
-| `events`（`buffer-changed`、`custom`） | ○ |
-| `ui.popup`、装飾 | M2.3 |
-| `timers`、`process`、権限の宣言 | M1 のあと（LSP と一緒） |
+| 範囲 | 時期 |
+|------|------|
+| `editor`（バッファ、選択、`apply`、undo、検索、縦移動、スクロール、カーソルの形） | M1 |
+| `input`（入力スタック） | M1 |
+| `commands.call`（コアのコマンド） | M1 |
+| `ui.set-status`、`ui.panel` | M1 |
 | 構文木の API | M2.2 |
-| Go SDK | M1 のあと |
-
+| `ui.popup`、装飾 | M2.3 |
+| `commands.register`、`events`、`timers`、`editor.buffers` | M3.1 |
+| `process`、権限の宣言 | M3.2 |
+| Go SDK | M4 |

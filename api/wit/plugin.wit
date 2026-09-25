@@ -1,0 +1,129 @@
+package nib:plugin@0.1.0;
+
+interface types {
+    /// A UTF-8 byte offset into a buffer.
+    type offset = u64;
+
+    /// `head` is where the cursor is, so it may be before `anchor`.
+    record sel-range { anchor: offset, head: offset }
+
+    record selection { ranges: list<sel-range>, primary: u32 }
+
+    /// Replaces `start..end` of the buffer before the change with `text`.
+    record edit { start: offset, end: offset, text: string }
+
+    enum undo-mode {
+        /// Start a new undo step.
+        new-step,
+        /// Add to the last undo step, e.g. while typing in insert mode.
+        merge,
+    }
+
+    enum cursor-shape { block, bar, underline }
+
+    /// Shift is never set for chars: 'Q' already says it is shifted.
+    flags modifiers { ctrl, alt, shift, super }
+
+    variant key-code {
+        %char(char),
+        enter,
+        escape,
+        tab,
+        backspace,
+        delete,
+        up,
+        down,
+        left,
+        right,
+        home,
+        end,
+        page-up,
+        page-down,
+        f(u8),
+    }
+
+    record key-event { code: key-code, modifiers: modifiers }
+}
+
+interface editor {
+    use types.{offset, selection, edit, undo-mode, cursor-shape};
+
+    variant error {
+        /// The change was built against an older version of the buffer.
+        stale-version,
+        /// The offset is out of bounds or not on a char boundary.
+        invalid-position,
+        /// Edits in one change overlap each other.
+        overlapping-edits,
+        /// A selection needs at least one range and a primary index in bounds.
+        invalid-selection,
+        invalid-pattern(string),
+        /// The buffer or view no longer exists.
+        closed,
+    }
+
+    resource buffer {
+        /// Increases on every change, including undo and redo.
+        version: func() -> u64;
+        len: func() -> offset;
+        slice: func(start: offset, end: offset) -> result<string, error>;
+        /// Text ending with a line break has an empty last line.
+        line-count: func() -> u64;
+        line-start: func(line: u64) -> option<offset>;
+        line-of: func(pos: offset) -> result<u64, error>;
+        next-grapheme: func(pos: offset) -> result<offset, error>;
+        prev-grapheme: func(pos: offset) -> result<offset, error>;
+        path: func() -> option<string>;
+        /// The first match starting at or after `start`, or with `backward`,
+        /// the last match ending at or before `start`. `^` and `$` match at
+        /// every line.
+        find: func(pattern: string, start: offset, backward: bool) -> result<option<tuple<offset, offset>>, error>;
+        find-all: func(pattern: string, start: offset, end: offset) -> result<list<tuple<offset, offset>>, error>;
+    }
+
+    resource view {
+        buffer: func() -> buffer;
+        selection: func() -> selection;
+        set-selection: func(sel: selection) -> result<_, error>;
+        /// Applies `edits` atomically. Without `after`, the selection is
+        /// mapped through the change.
+        apply: func(base-version: u64, edits: list<edit>, after: option<selection>, undo: undo-mode) -> result<_, error>;
+        /// Returns false when there is nothing to undo.
+        undo: func() -> bool;
+        redo: func() -> bool;
+        set-cursor-shape: func(shape: cursor-shape);
+    }
+
+    active-view: func() -> view;
+}
+
+interface input {
+    /// Adds a layer for this plugin on top of the input stack. Keys go to the
+    /// top layer first.
+    push-layer: func();
+    /// Removes this plugin's topmost layer.
+    pop-layer: func();
+}
+
+interface guest {
+    use types.{key-event};
+
+    enum key-result {
+        handled,
+        /// Let the layer below handle the key.
+        pass,
+    }
+
+    /// Called once after loading. `config` is the plugin's config table as JSON.
+    init: func(config: string) -> result<_, string>;
+
+    /// A key reached one of this plugin's input layers.
+    handle-key: func(ev: key-event) -> key-result;
+}
+
+world plugin {
+    import editor;
+    import input;
+
+    export guest;
+}

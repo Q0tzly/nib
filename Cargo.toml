@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["core", "tui"]
+members = ["core", "tui", "sdk/rust", "xtask"]
+exclude = ["plugins"]
 
 [workspace.package]
 version = "0.1.3"

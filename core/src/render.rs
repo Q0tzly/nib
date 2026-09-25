@@ -6,7 +6,8 @@ use crate::editor::{Editor, Menu};
 use crate::grid::{Cursor, Grid, Style, display_width};
 
 const TAB_WIDTH: u16 = 4;
-const MAIN_MENU: &str = "[r] restart plugins  [w] save all and quit  [q] quit  [Ctrl-g] send Ctrl-g  [any other key] back";
+const MAIN_MENU: &str =
+    "[r] restart plugins  [w] save all and quit  [q] quit  [any other key] back";
 
 impl Editor {
     /// Draws the editor into `grid`, resizing it to the editor size.

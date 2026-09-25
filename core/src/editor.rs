@@ -40,7 +40,7 @@ pub struct Editor {
 
 const LENT: &str = "editor state is only lent during plugin calls";
 
-/// Reserved by the core. Plugins see it only when pressed twice.
+/// Reserved by the core; plugins never see it.
 const MENU_KEY: KeyEvent = KeyEvent::ctrl('g');
 
 impl Default for Editor {
@@ -120,8 +120,8 @@ impl Editor {
 
     /// Sends the key down the input stack until a plugin handles it.
     ///
-    /// The menu key never goes to plugins directly: it opens the core menu,
-    /// so plugins can always be managed even if one swallows every key.
+    /// The menu key never goes to plugins: it opens the core menu, so
+    /// plugins can always be managed even if one swallows every key.
     pub fn handle_key(&mut self, key: KeyEvent) {
         self.state_mut().message = None;
         if let Some(menu) = self.state_mut().menu.take() {
@@ -163,7 +163,6 @@ impl Editor {
     fn handle_menu_key(&mut self, menu: Menu, key: KeyEvent) {
         let plain = |c: char| key == KeyEvent::new(KeyCode::Char(c));
         match menu {
-            Menu::Main if key == MENU_KEY => self.send_to_plugins(key),
             Menu::Main if plain('r') => self.restart_plugins(),
             Menu::Main if plain('w') => match self.save_all() {
                 Ok(()) => self.state_mut().quit = true,

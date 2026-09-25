@@ -49,10 +49,15 @@ fn plugin_edits_the_buffer() {
     editor.handle_key(key('!'));
     assert_eq!(editor.buffer().text().to_string(), "hi あ!");
 
-    // Pressed twice, Ctrl-g reaches the plugin.
+    // Ctrl-g never reaches the plugin: pressed again, it closes the menu.
     editor.handle_key(KeyEvent::ctrl('g'));
     editor.handle_key(KeyEvent::ctrl('g'));
-    assert_eq!(editor.buffer().text().to_string(), "hi あ!^G");
+    assert_eq!(editor.menu(), None);
+    assert_eq!(editor.buffer().text().to_string(), "hi あ!");
+
+    // Other Ctrl keys do reach it.
+    editor.handle_key(KeyEvent::ctrl('x'));
+    assert_eq!(editor.buffer().text().to_string(), "hi あ!^X");
 
     // Escape pops the plugin's layer.
     assert_eq!(editor.key_hint(), None);

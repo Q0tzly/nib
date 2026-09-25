@@ -2,7 +2,7 @@
 # Build them with `cargo xtask build-plugins` from the repository root.
 [workspace]
 resolver = "3"
-members = ["test/*"]
+members = ["helix", "test/*"]
 
 [workspace.package]
 edition = "2024"

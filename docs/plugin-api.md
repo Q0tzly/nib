@@ -207,10 +207,11 @@ JSON を選んだのは、WIT に再帰する型がなく、任意の値の木�
 
 | 関数 | 用途 |
 |------|------|
-| `ui.set-status(id, side, priority, content)` | ステータスラインに項目を出す。`side` は左・中・右、同じ側では `priority` 順に並べる |
-| `ui.open-popup(anchor, lines)` | バッファ上の位置に結びつけたポップアップ。`popup` リソースを返す |
-| `ui.open-panel(lines)` | 画面下端のパネル。`panel` リソースを返し、`update` で中身を差し替える |
-| `panel.set-cursor(line, pos)` | パネル内のカーソル。コマンドラインの入力位置に使う |
+| `ui.set-status(id, side, priority, content)` / `ui.remove-status(id)` | ステータスラインに項目を出す。`side` は左か右で、同じ側では `priority` の小さい順に並べる |
+| `ui.show-message(text)` | 次のキーまでメッセージを出す |
+| `ui.panel(lines)` | 画面下端（ステータスラインの上）のパネル。リソースで、`update` で中身を差し替え、捨てると閉じる |
+| `panel.set-cursor(option<(line, byte)>)` | パネル内のカーソル。設定している間は、バッファのカーソルの代わりにここへカーソルを出す。コマンドラインの入力位置に使う |
+| `ui.open-popup(anchor, lines)` | バッファ上の位置に結びつけたポップアップ（M2） |
 
 中身はすべて `styled-line` で渡し、配置と切り詰めはコアが行う。
 

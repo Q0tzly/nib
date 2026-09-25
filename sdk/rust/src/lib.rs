@@ -9,4 +9,6 @@ wit_bindgen::generate!({
     pub_export_macro: true,
     export_macro_name: "export",
     default_bindings_module: "nib_plugin",
+    // Plugins compare keys and other values, so make that possible.
+    additional_derives: [PartialEq, Eq, Hash],
 });

@@ -102,6 +102,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nib-plugin-helix"
+version = "0.1.0"
+dependencies = [
+ "nib-plugin",
+]
+
+[[package]]
 name = "nib-test-plugin-insert"
 version = "0.0.0"
 dependencies = [

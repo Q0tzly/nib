@@ -1,33 +1,19 @@
 //! Runs the test plugins in `plugins/test`. Build them first with
 //! `cargo xtask build-plugins`.
 
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use std::{env, fs};
 
-use nib_core::{Config, Editor, Grid, KeyCode, KeyEvent, Menu, PluginOptions, Range, Symbol};
+use nib_core::{Config, Editor, KeyCode, KeyEvent, Menu, PluginOptions, Range};
 
-fn plugin_dir(name: &str) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../target/plugins")
-        .join(name);
-    assert!(
-        dir.join("plugin.wasm").is_file(),
-        "{} is missing; run `cargo xtask build-plugins` first",
-        dir.display()
-    );
-    dir
-}
+mod common;
+use common::{key, plugin_dir, screen};
 
 fn editor_with(name: &str, options: PluginOptions) -> Editor {
     let mut editor = Editor::default();
     editor.set_plugin_options(options);
     editor.load_plugin(&plugin_dir(name)).unwrap();
     editor
-}
-
-fn key(c: char) -> KeyEvent {
-    KeyEvent::new(KeyCode::Char(c))
 }
 
 #[test]
@@ -159,22 +145,6 @@ fn key_latency() {
     let per_key = started.elapsed() / keys;
     println!("{per_key:?} per key (insert through test-insert)");
     assert_eq!(editor.plugins()[0].slow_calls, 0);
-}
-
-fn screen(editor: &Editor) -> Vec<String> {
-    let mut grid = Grid::default();
-    editor.render(&mut grid);
-    (0..grid.height())
-        .map(|y| {
-            (0..grid.width())
-                .filter_map(|x| match &grid.cell(x, y).symbol {
-                    Symbol::Char(c) => Some(c.to_string()),
-                    Symbol::Str(s) => Some(s.to_string()),
-                    Symbol::Continuation => None,
-                })
-                .collect()
-        })
-        .collect()
 }
 
 #[test]

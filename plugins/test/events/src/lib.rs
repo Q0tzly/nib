@@ -6,15 +6,25 @@ use std::cell::RefCell;
 
 use nib_plugin::exports::nib::plugin::guest::{Guest, KeyResult};
 use nib_plugin::nib::plugin::events::{self, Event};
+use nib_plugin::nib::plugin::process::{self, Child, Stream};
 use nib_plugin::nib::plugin::types::{Edit, KeyEvent, UndoMode};
 use nib_plugin::nib::plugin::{commands, editor, timers};
 
-thread_local! {
-    static LOG: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+/// A program it started, and what it printed so far.
+struct Program {
+    child: Child,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
 }
 
-const COMMANDS: [&str; 8] = [
-    "echo", "call", "log", "emit", "timer", "cancel", "edit", "buffers",
+thread_local! {
+    static LOG: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    static PROGRAMS: RefCell<Vec<Program>> = const { RefCell::new(Vec::new()) };
+}
+
+const COMMANDS: [&str; 12] = [
+    "echo", "call", "log", "emit", "timer", "cancel", "edit", "buffers", "spawn", "write", "close",
+    "kill",
 ];
 
 struct Events;
@@ -69,6 +79,30 @@ impl Guest for Events {
                 Ok(String::new())
             }
             "buffers" => Ok(editor::buffers().len().to_string()),
+            // The command and its arguments, one per line.
+            "spawn" => {
+                let mut words = args.lines().map(String::from);
+                let command = words.next().ok_or("spawn needs a command")?;
+                let args: Vec<String> = words.collect();
+                let child = process::spawn(&command, &args, None)?;
+                let id = child.id();
+                PROGRAMS.with_borrow_mut(|programs| {
+                    programs.push(Program {
+                        child,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    })
+                });
+                Ok(id.to_string())
+            }
+            // "<id> <text>"
+            "write" => {
+                let (id, text) = args.split_once(' ').ok_or("write needs an id and text")?;
+                with_program(id, |p| p.child.write(text.as_bytes()))??;
+                Ok(String::new())
+            }
+            "close" => with_program(&args, |p| p.child.close_stdin()).map(|()| String::new()),
+            "kill" => with_program(&args, |p| p.child.kill()).map(|()| String::new()),
             _ => Err(format!("no command {name}")),
         }
     }
@@ -104,9 +138,54 @@ impl Guest for Events {
                 format!("custom {} {}", custom.name, custom.data)
             }
             Event::Timer(id) => format!("timer {id}"),
+            Event::ProcessOutput(output) => {
+                PROGRAMS.with_borrow_mut(|programs| {
+                    if let Some(p) = programs.iter_mut().find(|p| p.child.id() == output.process) {
+                        match output.stream {
+                            Stream::Stdout => p.stdout.extend(&output.data),
+                            Stream::Stderr => p.stderr.extend(&output.data),
+                        }
+                    }
+                });
+                return;
+            }
+            // Everything a program printed, written down when it ends.
+            Event::ProcessExit(exit) => PROGRAMS.with_borrow_mut(|programs| {
+                let Some(at) = programs.iter().position(|p| p.child.id() == exit.process) else {
+                    return format!("exit of unknown {}", exit.process);
+                };
+                let program = programs.remove(at);
+                format!(
+                    "exit {} {:?} stdout={} stderr={}",
+                    exit.process,
+                    exit.code,
+                    printed(&program.stdout),
+                    printed(&program.stderr)
+                )
+            }),
         };
         LOG.with_borrow_mut(|log| log.push(entry));
     }
+}
+
+/// Runs `f` on the program with id `id`.
+fn with_program<R>(id: &str, f: impl FnOnce(&mut Program) -> R) -> Result<R, String> {
+    let id: u64 = id.trim().parse().map_err(|_| "not an id")?;
+    PROGRAMS.with_borrow_mut(|programs| {
+        let program = programs
+            .iter_mut()
+            .find(|p| p.child.id() == id)
+            .ok_or("no such program")?;
+        Ok(f(program))
+    })
+}
+
+/// Output on one line, the same on every system.
+fn printed(data: &[u8]) -> String {
+    String::from_utf8_lossy(data)
+        .replace('\r', "")
+        .trim_end()
+        .replace('\n', "|")
 }
 
 /// The file name of a buffer's path.

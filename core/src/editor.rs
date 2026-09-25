@@ -12,6 +12,7 @@ use crate::events::{Command, Event, Timer};
 use crate::input::{KeyCode, KeyEvent};
 use crate::layout;
 use crate::plugin::{PluginId, Plugins};
+use crate::process::{Message, Processes, Waker};
 use crate::syntax::{BufferSyntax, Languages};
 use crate::ui::{Panel, Popup, StatusItem, Theme};
 use crate::view::View;
@@ -45,6 +46,8 @@ pub(crate) struct State {
     pub commands: Vec<Command>,
     pub timers: Vec<Timer>,
     pub last_timer_id: u64,
+    /// Programs plugins started.
+    pub processes: Processes,
     /// Views of buffers not shown, so switching back restores the selection
     /// and scroll position.
     pub hidden_views: HashMap<usize, View>,
@@ -275,6 +278,7 @@ impl State {
         }
         self.commands.retain(|command| command.owner != plugin);
         self.timers.retain(|timer| timer.owner != plugin);
+        self.processes.remove_owner(plugin);
         self.events.retain(|(target, _)| *target != Some(plugin));
     }
 
@@ -381,6 +385,7 @@ impl Default for Editor {
                 commands: Vec::new(),
                 timers: Vec::new(),
                 last_timer_id: 0,
+                processes: Processes::default(),
                 hidden_views: HashMap::new(),
                 languages: Languages::default(),
                 theme: Theme::default(),
@@ -486,6 +491,35 @@ impl Editor {
             self.send_to_plugins(key);
         }
         self.after_plugins_ran();
+    }
+
+    /// Sets what background threads call after queueing work, such as a
+    /// program's output, so the frontend can wake up and call
+    /// `run_background`.
+    pub fn set_waker(&mut self, waker: Option<Waker>) {
+        self.state_mut().processes.set_waker(waker);
+    }
+
+    /// Hands what background threads queued to the plugins. Returns whether
+    /// there was anything.
+    pub fn run_background(&mut self) -> bool {
+        let messages = self.state_mut().processes.take_messages();
+        if messages.is_empty() {
+            return false;
+        }
+        for (owner, message) in messages {
+            let event = match message {
+                Message::Output { id, stream, data } => Event::ProcessOutput {
+                    process: id,
+                    stream,
+                    data,
+                },
+                Message::Exit { id, code } => Event::ProcessExit { process: id, code },
+            };
+            self.state_mut().push_event(Some(owner), event);
+        }
+        self.after_plugins_ran();
+        true
     }
 
     /// Delivers the events plugins caused, then brings the syntax tree and

@@ -19,7 +19,12 @@ pub(crate) struct Manifest {
     /// The kinds of events the plugin gets, e.g. "buffer-changed".
     #[serde(default)]
     pub events: Vec<String>,
+    /// What it may do beyond the editor API.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
+
+pub(crate) const CAPABILITIES: [&str; 4] = ["process", "fs-read", "fs-write", "network"];
 
 /// A language the plugin provides: a tree-sitter grammar as WebAssembly and
 /// its queries, as files in the plugin.
@@ -60,6 +65,18 @@ pub(crate) fn parse(text: &str, origin: &str) -> Result<Manifest, Error> {
     // core commands.
     if ["buffer", "editor", "view"].contains(&manifest.name.as_str()) {
         return Err(fail(format!("name {:?} is reserved", manifest.name)));
+    }
+    // A misspelled capability would leave the plugin without it, failing
+    // later in confusing ways.
+    if let Some(unknown) = manifest
+        .capabilities
+        .iter()
+        .find(|c| !CAPABILITIES.contains(&c.as_str()))
+    {
+        return Err(fail(format!(
+            "unknown capability {unknown:?}; known ones are {}",
+            CAPABILITIES.join(", ")
+        )));
     }
     Ok(manifest)
 }

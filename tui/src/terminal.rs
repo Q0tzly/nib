@@ -1,5 +1,8 @@
 use std::io::{self, Write};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread;
+use std::time::Instant;
 
 use crossterm::event::{self, Event, KeyEventKind, KeyModifiers};
 use crossterm::{cursor, execute, terminal};
@@ -7,10 +10,19 @@ use nib_core::{Editor, Grid, KeyCode, KeyEvent, Modifiers};
 
 use crate::draw;
 
+/// What wakes the main loop.
+enum Wake {
+    Input(io::Result<Event>),
+    /// A background thread queued work in the editor, such as a program's
+    /// output.
+    Background,
+}
+
 pub fn run(editor: &mut Editor) -> io::Result<()> {
     let _guard = TerminalGuard::enter()?;
     let (width, height) = terminal::size()?;
     editor.resize(width, height);
+    let wakes = start_input(editor);
 
     let mut stdout = io::stdout().lock();
     let mut prev = Grid::default();
@@ -33,25 +45,64 @@ pub fn run(editor: &mut Editor) -> io::Result<()> {
             continue;
         }
 
-        // Wait for input, but only until the next timer is due.
-        if let Some(due) = editor.next_timer()
-            && !event::poll(due.saturating_duration_since(Instant::now()))?
-        {
-            editor.run_timers();
-            if editor.should_quit() {
-                return Ok(());
-            }
-            continue;
-        }
-        handle(editor, event::read()?);
+        // Wait for input or background work, but only until the next
+        // timer is due.
+        let wake = match editor.next_timer() {
+            Some(due) => match wakes.recv_timeout(due.saturating_duration_since(Instant::now())) {
+                Ok(wake) => wake,
+                Err(RecvTimeoutError::Timeout) => {
+                    editor.run_timers();
+                    if editor.should_quit() {
+                        return Ok(());
+                    }
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            },
+            None => match wakes.recv() {
+                Ok(wake) => wake,
+                Err(_) => return Ok(()),
+            },
+        };
+        wakeup(editor, wake)?;
         // Handle everything already queued, then draw once.
-        while event::poll(Duration::ZERO)? {
-            handle(editor, event::read()?);
+        while let Ok(wake) = wakes.try_recv() {
+            wakeup(editor, wake)?;
         }
         if editor.should_quit() {
             return Ok(());
         }
     }
+}
+
+/// Reads the terminal on its own thread, so the main loop can wait for
+/// input and background work together.
+fn start_input(editor: &mut Editor) -> Receiver<Wake> {
+    let (sender, receiver) = mpsc::channel();
+    let background = sender.clone();
+    editor.set_waker(Some(Arc::new(move || {
+        let _ = background.send(Wake::Background);
+    })));
+    thread::spawn(move || {
+        loop {
+            let event = event::read();
+            let failed = event.is_err();
+            if sender.send(Wake::Input(event)).is_err() || failed {
+                return;
+            }
+        }
+    });
+    receiver
+}
+
+fn wakeup(editor: &mut Editor, wake: Wake) -> io::Result<()> {
+    match wake {
+        Wake::Input(event) => handle(editor, event?),
+        Wake::Background => {
+            editor.run_background();
+        }
+    }
+    Ok(())
 }
 
 fn handle(editor: &mut Editor, event: Event) {

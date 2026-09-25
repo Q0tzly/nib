@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Cache, CacheConfig, Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap};
-use wasmtime_wasi::WasiCtx;
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
+use wasmtime_wasi::{FsPerms, WasiCtx};
 
 use crate::Error;
 use crate::config::Settings;
@@ -84,6 +84,8 @@ pub struct PluginInfo {
     pub has_code: bool,
     /// A call taking longer is stopped.
     pub timeout: Duration,
+    /// What it may do beyond the editor API, from its manifest.
+    pub capabilities: Vec<String>,
 }
 
 /// Where a plugin's manifest and code come from.
@@ -194,6 +196,7 @@ struct Plugin {
     limits: Limits,
     /// The kinds of events it gets.
     subscriptions: Vec<String>,
+    capabilities: Vec<String>,
     /// Out of `Plugins` while a call runs: calling it again then would
     /// re-enter it.
     instance: Option<Instance>,
@@ -226,6 +229,8 @@ pub(crate) struct PluginData {
     /// The other plugins, present only during a call, so it can call them.
     plugins: Option<Plugins>,
     plugin: PluginId,
+    /// It may start programs.
+    can_spawn: bool,
     wasi: WasiCtx,
     table: ResourceTable,
     limits: StoreLimits,
@@ -312,6 +317,7 @@ impl Editor {
             config: settings.settings,
             limits,
             subscriptions: manifest.events,
+            capabilities: manifest.capabilities,
             instance: None,
             in_call: false,
             enabled: true,
@@ -426,6 +432,7 @@ impl Editor {
         let plugin = &mut self.plugins.entries[id];
         plugin.version = manifest.version;
         plugin.subscriptions = manifest.events;
+        plugin.capabilities = manifest.capabilities;
         plugin.component = component;
         self.restart_plugin(id)
     }
@@ -460,6 +467,7 @@ impl Editor {
                 reloadable: p.dir.is_some(),
                 has_code: p.component.is_some(),
                 timeout: p.limits.call,
+                capabilities: p.capabilities.clone(),
             })
             .collect()
     }
@@ -486,11 +494,13 @@ impl Editor {
         let limits = plugin.limits;
 
         let stderr = MemoryOutputPipe::new(STDERR_CAPACITY);
+        let wasi = wasi_context(&plugin.capabilities, stderr.clone())?;
         let data = PluginData {
             state: None,
             plugins: None,
             plugin: id,
-            wasi: WasiCtx::builder().stderr(stderr.clone()).build(),
+            can_spawn: plugin.capabilities.iter().any(|c| c == "process"),
+            wasi,
             table: ResourceTable::new(),
             limits: StoreLimitsBuilder::new().memory_size(limits.memory).build(),
         };
@@ -792,6 +802,34 @@ impl PluginData {
             .ok_or_else(|| wasmtime::Error::msg("plugins are only reachable during a call"))?;
         Ok(&plugins.entries[self.plugin].name)
     }
+}
+
+/// WASI with what `capabilities` allow: the working directory for the file
+/// ones, and the host's network for "network". Nothing else.
+fn wasi_context(capabilities: &[String], stderr: MemoryOutputPipe) -> Result<WasiCtx, String> {
+    let has = |name: &str| capabilities.iter().any(|c| c == name);
+    let mut builder = WasiCtx::builder();
+    builder.stderr(stderr);
+    let perms = if has("fs-write") {
+        Some(FsPerms::ReadWrite)
+    } else if has("fs-read") {
+        Some(FsPerms::ReadOnly)
+    } else {
+        None
+    };
+    if let Some(perms) = perms {
+        builder
+            .preopened_dir(".", ".", perms)
+            .map_err(|err| format!("opening the working directory failed: {err}"))?;
+    }
+    if has("network") {
+        builder
+            .inherit_network()
+            .allow_ip_name_lookup(true)
+            .allow_tcp(true)
+            .allow_udp(true);
+    }
+    Ok(builder.build())
 }
 
 fn describe_failure(plugin: &Plugin, err: &wasmtime::Error) -> String {

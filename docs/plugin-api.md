@@ -253,7 +253,7 @@ events = ["buffer-opened", "buffer-changed", "helix.mode_changed"]
 | `buffer-changed` | バッファの変更。変更後のバージョンと、変更の列 | 同上 |
 | `<plugin>.<name>` | プラグインが `events.emit(name, json)` で出したもの（custom イベント） | 同上 |
 | `timer` | `timers.set` で予約した時間がたった | 予約したプラグインだけ |
-| `process-output` / `process-exit` | 起動した外部プロセスの出力と終了（M3.2） | 起動したプラグインだけ |
+| `process-output` / `process-exit` | 起動した外部プロセスの出力と終了 | 起動したプラグインだけ |
 | `buffer-closed`、`selection-changed`、`paste` | 必要になったときに足す | |
 
 - `buffer-changed` の変更の列は、先頭から順に 1 つずつ適用していけば変更後のテキストになるように並べる。LSP の `didChange` の `contentChanges` と同じ考え方で、変更ごとに、その時点のテキストでの行と列（バイト数）を付ける。LSP プラグインは、これをそのまま差分の同期に使える。
@@ -327,8 +327,41 @@ set-decorations: func(buf: borrow<buffer>, namespace: string, decorations: list<
 
 - 宣言した権限は、確認なしですべて与える。
 - 宣言していない権限は与えない。宣言を強制することで、一覧の内容が常に実態と一致する。
-- 読み込んでいるプラグインと権限は、`editor.plugins` コマンドで一覧できる。
+  - `process` がなければ、`process.spawn` はエラーを返す。
+  - `fs-read` / `fs-write` がなければ、WASI にディレクトリを渡さない。`network` がなければ、WASI のソケットはどこにもつながらない。
+  - 知らない名前の権限を書いたプラグインは、読み込まない。書き間違いで権限が抜けたまま動くのを防ぐため。
+- 読み込んでいるプラグインと権限は、Ctrl-g のメニューで一覧できる。
+- プラグイン専用のデータディレクトリは、使うプラグインが出てきたときに作る。
 - 大量のファイルを列挙するような重い I/O は、コアが非同期の仕事として提供し、結果をイベントで返す。WASI のファイル API は同期的なので、プラグインが直接やるとメインスレッドが止まる。
+
+## 外部プロセス
+
+```wit
+interface process {
+    enum stream { stdout, stderr }
+
+    /// 起動した子プロセス。捨てると終了させる
+    resource child {
+        /// イベントで、どの子プロセスのものかを見分ける
+        id: func() -> u64;
+        /// 標準入力に書く
+        write: func(data: list<u8>) -> result<_, string>;
+        /// 標準入力を閉じる
+        close-stdin: func();
+        kill: func();
+    }
+
+    /// command を args で起動する。cwd がなければエディタの作業ディレクトリで動かす
+    spawn: func(command: string, args: list<string>, cwd: option<string>) -> result<child, string>;
+}
+```
+
+- 出力は `process-output(id, stream, data)`、終了は `process-exit(id, code)` のイベントで、起動したプラグインにだけ届く。マニフェストの `events` に書かなくてよい。
+  - 出力はバイト列のまま、読めた分ずつ届ける。行や LSP のメッセージへの区切りは、プラグインが行う。
+  - 終了コードは、シグナルで終わったときなど、ないこともある。
+- 読み取りは裏のスレッドで行う。プラグインは出力を待たずに戻り、届いたらイベントで受け取る（architecture.md の「待たせない」）。
+- 標準入力への書き込みは、そのままパイプに書く。相手が読まずにパイプが詰まると書き込みが止まるので、大量に書くときは相手の出力も読むこと（LSP では問題にならない量）。
+- プラグインが止まると、そのプラグインが起動したプロセスはすべて終了させる。
 
 ## ライフサイクル
 

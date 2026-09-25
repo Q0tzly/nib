@@ -151,12 +151,35 @@ interface commands {
     all: func() -> list<tuple<string, string>>;
 }
 
+/// Other programs, for plugins with the "process" capability. Output is
+/// read on background threads and arrives as events, so plugins never wait
+/// for it.
+interface process {
+    enum %stream { stdout, stderr }
+
+    /// A running program. Dropping it kills the program.
+    resource child {
+        /// The id its events carry.
+        id: func() -> u64;
+        /// Writes to its standard input. A program that does not read can
+        /// make this wait, so write in pieces it answers.
+        write: func(data: list<u8>) -> result<_, string>;
+        close-stdin: func();
+        kill: func();
+    }
+
+    /// Starts `command` with `args`, in `cwd` or the editor's working
+    /// directory.
+    spawn: func(command: string, args: list<string>, cwd: option<string>) -> result<child, string>;
+}
+
 /// Events reach `guest.on-event` after the call that caused them, in the
 /// order they happened. A plugin gets the kinds listed in `events` in its
-/// plugin.toml, and its own timers.
+/// plugin.toml, and its own timers and programs.
 interface events {
     use types.{offset};
     use editor.{buffer};
+    use process.{%stream};
 
     /// One change, at positions in the text as it is when the changes
     /// before it in the list have been applied. Lines and columns count
@@ -182,6 +205,13 @@ interface events {
     /// An event a plugin emitted; `name` has the plugin's name in front.
     record custom-event { name: string, data: string }
 
+    /// Output as it was read, not split into lines.
+    record process-output { process: u64, %stream: %stream, data: list<u8> }
+
+    /// `code` is missing when the program had none, e.g. when a signal
+    /// ended it.
+    record process-exit { process: u64, code: option<s32> }
+
     variant event {
         buffer-opened(buffer),
         buffer-saved(buffer),
@@ -189,6 +219,9 @@ interface events {
         custom(custom-event),
         /// The id `timers.set` returned.
         timer(u64),
+        /// Only to the plugin that started the program.
+        process-output(process-output),
+        process-exit(process-exit),
     }
 
     /// Emits the custom event `<plugin>.<name>` with JSON `data`.
@@ -334,6 +367,7 @@ world plugin {
     import syntax;
     import events;
     import timers;
+    import process;
 
     export guest;
 }

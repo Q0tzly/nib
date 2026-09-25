@@ -1,6 +1,7 @@
 name = "test-events"
 version = "0.0.0"
 api = "0.1"
+capabilities = ["process"]
 events = [
     "buffer-opened",
     "buffer-saved",

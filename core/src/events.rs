@@ -7,6 +7,7 @@ use ropey::Rope;
 
 use crate::change::ChangeSet;
 use crate::plugin::PluginId;
+use crate::process::Stream;
 
 /// One change of a buffer, at positions in the text as it is when the
 /// changes before it in its list have been applied.
@@ -37,6 +38,15 @@ pub(crate) enum Event {
         data: String,
     },
     Timer(u64),
+    ProcessOutput {
+        process: u32,
+        stream: Stream,
+        data: Vec<u8>,
+    },
+    ProcessExit {
+        process: u32,
+        code: Option<i32>,
+    },
 }
 
 impl Event {
@@ -48,6 +58,8 @@ impl Event {
             Event::BufferChanged { .. } => "buffer-changed",
             Event::Custom { name, .. } => name,
             Event::Timer(_) => "timer",
+            Event::ProcessOutput { .. } => "process-output",
+            Event::ProcessExit { .. } => "process-exit",
         }
     }
 }

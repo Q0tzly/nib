@@ -15,6 +15,7 @@ use crate::grid::CursorShape;
 use crate::history::UndoMode;
 use crate::input::{KeyCode, KeyEvent};
 use crate::layout;
+use crate::process::Stream;
 use crate::selection::{Range, Selection};
 use crate::syntax::{self as trees, NodeInfo};
 use crate::ui::{Panel, Popup, PopupAnchor, Side, Span, StatusItem, StyledLine};
@@ -32,12 +33,13 @@ pub(crate) mod bindings {
             "nib:plugin/editor.view": super::ViewHandle,
             "nib:plugin/ui.panel": super::PanelHandle,
             "nib:plugin/ui.popup": super::PopupHandle,
+            "nib:plugin/process.child": super::ChildHandle,
         },
     });
 }
 
 use bindings::nib::plugin::{
-    commands, editor, events, input, settings, syntax, timers, types as wit, ui as wit_ui,
+    commands, editor, events, input, process, settings, syntax, timers, types as wit, ui as wit_ui,
 };
 
 /// A buffer as seen by a plugin. The resource's rep is the buffer index.
@@ -51,6 +53,10 @@ pub struct PanelHandle;
 
 /// A popup as seen by a plugin. The resource's rep is the popup id.
 pub struct PopupHandle;
+
+/// A program as seen by the plugin that started it. The resource's rep is
+/// the process id.
+pub struct ChildHandle;
 
 type HostResult<T> = wasmtime::Result<T>;
 
@@ -547,6 +553,64 @@ impl timers::Host for PluginData {
     }
 }
 
+impl process::Host for PluginData {
+    fn spawn(
+        &mut self,
+        command: String,
+        args: Vec<String>,
+        cwd: Option<String>,
+    ) -> HostResult<Result<Resource<ChildHandle>, String>> {
+        if !self.can_spawn {
+            return Ok(Err(format!(
+                "{command}: starting programs needs the \"process\" capability"
+            )));
+        }
+        let owner = self.plugin;
+        let spawned = self
+            .state()?
+            .processes
+            .spawn(owner, &command, &args, cwd.map(Into::into));
+        Ok(spawned.map(Resource::new_own))
+    }
+}
+
+impl process::HostChild for PluginData {
+    fn id(&mut self, child: Resource<ChildHandle>) -> HostResult<u64> {
+        Ok(u64::from(child.rep()))
+    }
+
+    fn write(
+        &mut self,
+        child: Resource<ChildHandle>,
+        data: Vec<u8>,
+    ) -> HostResult<Result<(), String>> {
+        let owner = self.plugin;
+        Ok(self.state()?.processes.write(child.rep(), owner, &data))
+    }
+
+    fn close_stdin(&mut self, child: Resource<ChildHandle>) -> HostResult<()> {
+        let owner = self.plugin;
+        self.state()?.processes.close_stdin(child.rep(), owner);
+        Ok(())
+    }
+
+    fn kill(&mut self, child: Resource<ChildHandle>) -> HostResult<()> {
+        let owner = self.plugin;
+        self.state()?.processes.kill(child.rep(), owner);
+        Ok(())
+    }
+
+    fn drop(&mut self, child: Resource<ChildHandle>) -> HostResult<()> {
+        let owner = self.plugin;
+        // Outside a call, the plugin is being stopped and its programs are
+        // killed anyway.
+        if let Some(state) = self.state.as_mut() {
+            state.processes.forget(child.rep(), owner);
+        }
+        Ok(())
+    }
+}
+
 /// An event as a plugin gets it, with handles to the buffers it names.
 pub(crate) fn wit_event(event: &Event) -> events::Event {
     let buffer = |index: usize| Resource::new_own(index as u32);
@@ -579,6 +643,22 @@ pub(crate) fn wit_event(event: &Event) -> events::Event {
             data: data.clone(),
         }),
         Event::Timer(id) => events::Event::Timer(*id),
+        Event::ProcessOutput {
+            process,
+            stream,
+            data,
+        } => events::Event::ProcessOutput(events::ProcessOutput {
+            process: u64::from(*process),
+            stream: match stream {
+                Stream::Stdout => process::Stream::Stdout,
+                Stream::Stderr => process::Stream::Stderr,
+            },
+            data: data.clone(),
+        }),
+        Event::ProcessExit { process, code } => events::Event::ProcessExit(events::ProcessExit {
+            process: u64::from(*process),
+            code: *code,
+        }),
     }
 }
 

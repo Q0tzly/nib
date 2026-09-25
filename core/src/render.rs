@@ -57,8 +57,13 @@ impl Editor {
                     (Some(err), false) => format!("disabled: {err}"),
                     (None, false) => "disabled".to_string(),
                 };
+                let can = if plugin.capabilities.is_empty() {
+                    String::new()
+                } else {
+                    format!("  can: {}", plugin.capabilities.join(", "))
+                };
                 let text = format!(
-                    " {}  {:<12} {:<8} limit: {:<7} slow calls: {:<4} {state}",
+                    " {}  {:<12} {:<8} limit: {:<7} slow calls: {:<4} {state}{can}",
                     id + 1,
                     plugin.name,
                     plugin.version,

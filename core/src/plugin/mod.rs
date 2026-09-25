@@ -31,7 +31,8 @@ pub fn plugin_name(dir: &Path) -> Result<String, Error> {
 /// The version of `nib:plugin` this host implements.
 pub const API_VERSION: &str = "0.1";
 
-/// How often the epoch advances. Timeouts are accurate to about one tick.
+/// How often the epoch advances during a plugin call. Timeouts are
+/// accurate to about one tick.
 const EPOCH_TICK: Duration = Duration::from_millis(10);
 /// A plugin that fails this many times within `CRASH_WINDOW` is disabled.
 const MAX_CRASHES: usize = 3;
@@ -98,12 +99,56 @@ pub(crate) struct Plugins {
 struct Runtime {
     engine: Engine,
     linker: Linker<PluginData>,
-    stop_ticker: Arc<AtomicBool>,
+    ticker: Ticker,
 }
 
-impl Drop for Runtime {
+/// Advances the engine's epoch while a plugin call runs, and sleeps
+/// otherwise, so an idle editor never wakes up for it.
+struct Ticker {
+    running: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+    thread: thread::Thread,
+}
+
+impl Ticker {
+    fn start(engine: Engine) -> std::io::Result<Self> {
+        let running = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (thread_running, thread_stop) = (running.clone(), stop.clone());
+        let handle = thread::Builder::new()
+            .name("nib-epoch".into())
+            .spawn(move || {
+                while !thread_stop.load(Ordering::Relaxed) {
+                    if thread_running.load(Ordering::Acquire) {
+                        thread::sleep(EPOCH_TICK);
+                        engine.increment_epoch();
+                    } else {
+                        // An unpark that comes first makes this return at once.
+                        thread::park();
+                    }
+                }
+            })?;
+        Ok(Self {
+            running,
+            stop,
+            thread: handle.thread().clone(),
+        })
+    }
+
+    fn begin(&self) {
+        self.running.store(true, Ordering::Release);
+        self.thread.unpark();
+    }
+
+    fn end(&self) {
+        self.running.store(false, Ordering::Release);
+    }
+}
+
+impl Drop for Ticker {
     fn drop(&mut self) {
-        self.stop_ticker.store(true, Ordering::Relaxed);
+        self.stop.store(true, Ordering::Relaxed);
+        self.thread.unpark();
     }
 }
 
@@ -154,21 +199,11 @@ impl Runtime {
             data
         })?;
 
-        let stop_ticker = Arc::new(AtomicBool::new(false));
-        let (ticker_engine, stop) = (engine.clone(), stop_ticker.clone());
-        thread::Builder::new()
-            .name("nib-epoch".into())
-            .spawn(move || {
-                while !stop.load(Ordering::Relaxed) {
-                    thread::sleep(EPOCH_TICK);
-                    ticker_engine.increment_epoch();
-                }
-            })?;
-
+        let ticker = Ticker::start(engine.clone())?;
         Ok(Self {
             engine,
             linker,
-            stop_ticker,
+            ticker,
         })
     }
 }
@@ -404,6 +439,12 @@ impl Editor {
         f: impl FnOnce(&bindings::Plugin, &mut Store<PluginData>) -> wasmtime::Result<R>,
     ) -> wasmtime::Result<R> {
         let warn_after = self.plugins.options.warn_after;
+        let ticker = &self
+            .plugins
+            .runtime
+            .as_ref()
+            .expect("runtime exists")
+            .ticker;
         let plugin = &mut self.plugins.entries[id];
         let instance = plugin
             .instance
@@ -413,7 +454,9 @@ impl Editor {
         instance.store.data_mut().state = self.state.take();
         instance.store.set_epoch_deadline(ticks(timeout));
         let started = Instant::now();
+        ticker.begin();
         let result = f(&instance.bindings, &mut instance.store);
+        ticker.end();
         let elapsed = started.elapsed();
         self.state = instance.store.data_mut().state.take();
 

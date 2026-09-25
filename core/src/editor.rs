@@ -157,6 +157,10 @@ impl Editor {
     /// Applies config.toml. Call before loading plugins, which get their
     /// tables from it.
     pub fn apply_config(&mut self, config: Config) {
+        let options = &mut self.plugins.options;
+        options.call_timeout = config.core.plugin_timeout;
+        options.init_timeout = config.core.plugin_init_timeout;
+        options.memory_limit = config.core.plugin_memory;
         self.state_mut().settings = config.core;
         self.plugin_configs = config.plugins;
     }
@@ -401,18 +405,18 @@ mod tests {
     fn view_follows_the_cursor_with_a_margin() {
         let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
         let mut editor = Editor::with_text(&text);
-        editor.resize(20, 10); // 9 text rows, margin 3
+        editor.resize(20, 10); // 9 text rows: the margin of 5 shrinks to 4
         let line_start = |editor: &Editor, line: usize| editor.buffer().line_start(line).unwrap();
 
         let pos = line_start(&editor, 50);
         editor.view_mut().selection = Selection::point(pos);
         press(&mut editor, &[KeyEvent::new(KeyCode::Escape)]);
-        assert_eq!(editor.view().top_line, 45);
+        assert_eq!(editor.view().top_line, 46);
 
         let pos = line_start(&editor, 44);
         editor.view_mut().selection = Selection::point(pos);
         press(&mut editor, &[KeyEvent::new(KeyCode::Escape)]);
-        assert_eq!(editor.view().top_line, 41);
+        assert_eq!(editor.view().top_line, 40);
 
         let pos = line_start(&editor, 1);
         editor.view_mut().selection = Selection::point(pos);

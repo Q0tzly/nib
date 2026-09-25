@@ -11,7 +11,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use nib_core::{Config, Editor, PluginOptions, plugin_name};
+use nib_core::{Config, Editor, plugin_name};
 
 const USAGE: &str = "usage: nib [--plugin DIR]... [FILE]...";
 
@@ -47,10 +47,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    editor.set_plugin_options(PluginOptions {
-        cache_dir: cache_dir(),
-        ..PluginOptions::default()
-    });
+    editor.set_plugin_cache_dir(cache_dir());
     let configured: Vec<PathBuf> = editor
         .settings()
         .plugins
@@ -64,6 +61,10 @@ fn main() -> ExitCode {
     }
     if let Some(err) = config_error {
         editor.show_message(format!("{err}; using the defaults"));
+    }
+    // The keymap takes every key, so nothing else tells people the menu key.
+    if editor.message().is_none() {
+        editor.show_message(format!("{}: plugin menu", editor.settings().menu_key));
     }
 
     if let Err(err) = terminal::run(&mut editor) {

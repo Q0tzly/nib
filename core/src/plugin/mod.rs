@@ -15,6 +15,7 @@ use wasmtime_wasi::WasiCtx;
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 
 use crate::Error;
+use crate::config::Settings;
 use crate::editor::{Editor, State};
 use crate::input::KeyEvent;
 use api::bindings;
@@ -55,9 +56,9 @@ impl Default for PluginOptions {
         Self {
             cache_dir: None,
             warn_after: Duration::from_millis(16),
-            call_timeout: Duration::from_secs(1),
-            init_timeout: Duration::from_secs(5),
-            memory_limit: 256 << 20,
+            call_timeout: Settings::default().plugin_timeout,
+            init_timeout: Settings::default().plugin_init_timeout,
+            memory_limit: Settings::default().plugin_memory,
         }
     }
 }
@@ -87,7 +88,7 @@ enum Source<'a> {
 
 #[derive(Default)]
 pub(crate) struct Plugins {
-    options: PluginOptions,
+    pub(crate) options: PluginOptions,
     /// Created when the first plugin is loaded, so starting without plugins
     /// costs nothing.
     runtime: Option<Runtime>,
@@ -176,6 +177,12 @@ impl Editor {
     /// Takes effect for plugins loaded afterwards.
     pub fn set_plugin_options(&mut self, options: PluginOptions) {
         self.plugins.options = options;
+    }
+
+    /// Where compiled plugins are cached. Takes effect for plugins loaded
+    /// afterwards.
+    pub fn set_plugin_cache_dir(&mut self, dir: Option<PathBuf>) {
+        self.plugins.options.cache_dir = dir;
     }
 
     /// Loads the plugin in `dir` and calls its `init` with its table from

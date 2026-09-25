@@ -183,3 +183,14 @@ fn core_menu_manages_each_plugin() {
     editor.handle_key(key('y'));
     assert_eq!(editor.buffer().text().to_string(), "xy");
 }
+
+#[test]
+fn plugin_limits_come_from_config() {
+    let mut editor = Editor::default();
+    editor.apply_config(Config::parse("[core]\nplugin-timeout-ms = 50").unwrap());
+    editor.load_plugin(&plugin_dir("test-misbehave")).unwrap();
+    let started = Instant::now();
+    editor.handle_key(key('l'));
+    assert!(started.elapsed() < Duration::from_millis(500));
+    assert!(editor.message().unwrap().contains("took too long"));
+}

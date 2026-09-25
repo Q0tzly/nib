@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -12,7 +13,7 @@ use crate::input::KeyEvent;
 ///
 /// Editing behavior (`tab_width`, `indent`, `scroll_margin`) is for plugins
 /// to read and, later, to override per buffer. Safety settings (`menu_key`,
-/// `plugins`) are for the user alone.
+/// `plugins`, and the plugin limits) are for the user alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     pub tab_width: u16,
@@ -22,6 +23,11 @@ pub struct Settings {
     pub menu_key: KeyEvent,
     /// Plugin directories to load besides the built-in plugins.
     pub plugins: Vec<PathBuf>,
+    /// A plugin call taking longer is stopped.
+    pub plugin_timeout: Duration,
+    pub plugin_init_timeout: Duration,
+    /// Maximum size of a plugin's memory, in bytes.
+    pub plugin_memory: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,9 +41,12 @@ impl Default for Settings {
         Self {
             tab_width: 4,
             indent: Indent::Spaces(4),
-            scroll_margin: 3,
+            scroll_margin: 5,
             menu_key: KeyEvent::ctrl('g'),
             plugins: Vec::new(),
+            plugin_timeout: Duration::from_secs(1),
+            plugin_init_timeout: Duration::from_secs(5),
+            plugin_memory: 256 << 20,
         }
     }
 }
@@ -82,6 +91,9 @@ struct RawCore {
     scroll_margin: Option<u16>,
     menu_key: Option<String>,
     plugins: Option<Vec<PathBuf>>,
+    plugin_timeout_ms: Option<u64>,
+    plugin_init_timeout_ms: Option<u64>,
+    plugin_memory_mib: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -129,6 +141,26 @@ impl Config {
         if let Some(plugins) = raw_core.plugins {
             core.plugins = plugins;
         }
+        let timeout = |name: &str, ms: u64| {
+            if ms < 10 {
+                return Err(fail(format!("{name} must be at least 10, not {ms}")));
+            }
+            Ok(Duration::from_millis(ms))
+        };
+        if let Some(ms) = raw_core.plugin_timeout_ms {
+            core.plugin_timeout = timeout("plugin-timeout-ms", ms)?;
+        }
+        if let Some(ms) = raw_core.plugin_init_timeout_ms {
+            core.plugin_init_timeout = timeout("plugin-init-timeout-ms", ms)?;
+        }
+        if let Some(mib) = raw_core.plugin_memory_mib {
+            if !(16..=4096).contains(&mib) {
+                return Err(fail(format!(
+                    "plugin-memory-mib must be 16 to 4096, not {mib}"
+                )));
+            }
+            core.plugin_memory = mib << 20;
+        }
 
         let plugins = raw
             .plugins
@@ -161,6 +193,8 @@ mod tests {
             indent = "tab"
             menu-key = "C-]"
             plugins = ["~/dev/my-plugin"]
+            plugin-timeout-ms = 2000
+            plugin-memory-mib = 512
 
             [plugins.helix]
             keys.normal = { "C-s" = "buffer.save" }
@@ -171,6 +205,9 @@ mod tests {
         assert_eq!(config.core.indent, Indent::Tab);
         assert_eq!(config.core.menu_key, KeyEvent::ctrl(']'));
         assert_eq!(config.core.plugins, vec![PathBuf::from("~/dev/my-plugin")]);
+        assert_eq!(config.core.plugin_timeout, Duration::from_secs(2));
+        assert_eq!(config.core.plugin_init_timeout, Duration::from_secs(5));
+        assert_eq!(config.core.plugin_memory, 512 << 20);
         assert_eq!(
             config.plugins["helix"],
             r#"{"keys":{"normal":{"C-s":"buffer.save"}}}"#
@@ -184,6 +221,8 @@ mod tests {
             ("[core]\ntab-width = 0", "tab-width must be"),
             ("[core]\nindent = \"spaces\"", "indent must be"),
             ("[core]\nmenu-key = \"C-nope\"", "menu-key"),
+            ("[core]\nplugin-timeout-ms = 0", "plugin-timeout-ms must be"),
+            ("[core]\nplugin-memory-mib = 1", "plugin-memory-mib must be"),
             ("[editor]\nx = 1", "unknown field"),
         ] {
             let err = Config::parse(text).unwrap_err().to_string();

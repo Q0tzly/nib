@@ -1,12 +1,17 @@
-//! Helix-style modal keymap: normal and insert modes, and a `:` command line.
+//! Helix-style modal keymap: normal, select, and insert modes, and a `:`
+//! command line.
 //!
-//! In normal mode every range is a block over one grapheme, as in Helix. The
-//! core knows nothing about modes; they live here.
+//! In normal mode every range is at least a block over one grapheme, as in
+//! Helix, and motions select what they pass over. The core knows nothing
+//! about modes; they live here.
+
+mod doc;
 
 use std::cell::RefCell;
 
+use doc::{Doc, FindKind};
 use nib_plugin::exports::nib::plugin::guest::{Guest, KeyResult};
-use nib_plugin::nib::plugin::editor::{Buffer, View};
+use nib_plugin::nib::plugin::editor::{ScrollAmount, View};
 use nib_plugin::nib::plugin::types::{
     CursorShape, Edit, KeyCode, KeyEvent, Modifiers, SelRange, Selection, Span, UndoMode,
 };
@@ -16,7 +21,18 @@ use nib_plugin::nib::plugin::{commands, editor, input, settings, ui};
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Normal,
+    /// Motions extend the selections instead of replacing them.
+    Select,
     Insert,
+}
+
+/// A key that waits for the next one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    /// `g`, for goto.
+    Goto,
+    /// `f`, `t`, `F`, `T`, waiting for the char.
+    Find(FindKind),
 }
 
 struct CommandLine {
@@ -26,6 +42,9 @@ struct CommandLine {
 
 struct Helix {
     mode: Mode,
+    pending: Option<Pending>,
+    /// A count typed before a command, as in `3w`.
+    count: Option<u64>,
     /// The display column `j` and `k` aim for, kept across short lines.
     column: Option<u32>,
     /// Whether the current insert session has edited yet, so later edits
@@ -41,6 +60,8 @@ thread_local! {
     static HELIX: RefCell<Helix> = const {
         RefCell::new(Helix {
             mode: Mode::Normal,
+            pending: None,
+            count: None,
             column: None,
             inserted: false,
             appending: false,
@@ -68,6 +89,20 @@ impl Guest for Plugin {
 
 nib_plugin::export!(Plugin);
 
+fn plain(ev: &KeyEvent) -> Option<char> {
+    match ev.code {
+        KeyCode::Char(c) if ev.modifiers.is_empty() => Some(c),
+        _ => None,
+    }
+}
+
+fn ctrl(ev: &KeyEvent) -> Option<char> {
+    match ev.code {
+        KeyCode::Char(c) if ev.modifiers == Modifiers::CTRL => Some(c),
+        _ => None,
+    }
+}
+
 impl Helix {
     fn handle_key(&mut self, ev: KeyEvent) -> KeyResult {
         if self.command_line.is_some() {
@@ -76,7 +111,7 @@ impl Helix {
         }
         let view = editor::active_view();
         let handled = match self.mode {
-            Mode::Normal => self.normal_key(&view, ev),
+            Mode::Normal | Mode::Select => self.normal_key(&view, ev),
             Mode::Insert => self.insert_key(&view, ev),
         };
         if handled {
@@ -90,16 +125,27 @@ impl Helix {
         self.mode = mode;
         let (label, style, shape) = match mode {
             Mode::Normal => (" NOR ", "ui.mode.normal", CursorShape::Block),
+            Mode::Select => (" SEL ", "ui.mode.select", CursorShape::Block),
             Mode::Insert => (" INS ", "ui.mode.insert", CursorShape::Bar),
         };
         editor::active_view().set_cursor_shape(shape);
         ui::set_status("mode", Side::Left, 0, &[span(label, style)]);
     }
 
+    /// Normal and select mode. Returns whether the key was used.
     fn normal_key(&mut self, view: &View, ev: KeyEvent) -> bool {
-        if !ev.modifiers.is_empty() {
-            return false;
+        if let Some(pending) = self.pending.take() {
+            self.pending_key(view, pending, ev);
+            self.count = None;
+            return true;
         }
+        if let Some(digit) = plain(&ev).and_then(|c| c.to_digit(10))
+            && (digit != 0 || self.count.is_some())
+        {
+            self.count = Some(self.count.unwrap_or(0) * 10 + u64::from(digit));
+            return true;
+        }
+        let count = self.count.take().unwrap_or(1);
         let vertical = matches!(
             ev.code,
             KeyCode::Char('j' | 'k') | KeyCode::Down | KeyCode::Up
@@ -107,69 +153,291 @@ impl Helix {
         if !vertical {
             self.column = None;
         }
+
+        if let Some(c) = ctrl(&ev) {
+            let amount = match c {
+                'd' => ScrollAmount::HalfPage(1),
+                'u' => ScrollAmount::HalfPage(-1),
+                'f' => ScrollAmount::Page(1),
+                'b' => ScrollAmount::Page(-1),
+                _ => return false,
+            };
+            self.scroll(view, amount);
+            return true;
+        }
+        if ev.modifiers == Modifiers::ALT && ev.code == KeyCode::Char(';') {
+            flip_selections(view);
+            return true;
+        }
         match ev.code {
-            KeyCode::Char('h') | KeyCode::Left => {
-                move_blocks(view, |buffer, pos| buffer.prev_grapheme(pos).unwrap_or(pos))
+            KeyCode::Left => self.move_cursors(view, count, |doc, pos| doc.prev_grapheme(pos)),
+            KeyCode::Right => self.move_cursors(view, count, next_char),
+            KeyCode::Down => self.move_lines(view, count as i32),
+            KeyCode::Up => self.move_lines(view, -(count as i32)),
+            KeyCode::Escape => {
+                if self.mode == Mode::Select {
+                    self.set_mode(Mode::Normal);
+                }
             }
-            KeyCode::Char('l') | KeyCode::Right => move_blocks(view, |buffer, pos| {
-                let next = buffer.next_grapheme(pos).unwrap_or(pos);
-                if next < buffer.len() { next } else { pos }
+            _ => match plain(&ev) {
+                Some(c) => return self.normal_char(view, c, count),
+                None => return false,
+            },
+        }
+        true
+    }
+
+    fn normal_char(&mut self, view: &View, c: char, count: u64) -> bool {
+        match c {
+            'h' => self.move_cursors(view, count, |doc, pos| doc.prev_grapheme(pos)),
+            'l' => self.move_cursors(view, count, next_char),
+            'j' => self.move_lines(view, count as i32),
+            'k' => self.move_lines(view, -(count as i32)),
+            'w' => self.motion(view, count, |doc, pos| {
+                doc::next_word_start(doc, pos, false)
             }),
-            KeyCode::Char('j') | KeyCode::Down => self.move_lines(view, 1),
-            KeyCode::Char('k') | KeyCode::Up => self.move_lines(view, -1),
-            KeyCode::Char('i') => self.insert_at(view, |range| range.anchor.min(range.head)),
-            KeyCode::Char('a') => {
+            'W' => self.motion(view, count, |doc, pos| doc::next_word_start(doc, pos, true)),
+            'e' => self.motion(view, count, |doc, pos| doc::next_word_end(doc, pos, false)),
+            'E' => self.motion(view, count, |doc, pos| doc::next_word_end(doc, pos, true)),
+            'b' => self.motion(view, count, |doc, pos| {
+                doc::prev_word_start(doc, pos, false)
+            }),
+            'B' => self.motion(view, count, |doc, pos| doc::prev_word_start(doc, pos, true)),
+            'f' => self.wait(Pending::Find(FindKind::Forward), count),
+            't' => self.wait(Pending::Find(FindKind::Till), count),
+            'F' => self.wait(Pending::Find(FindKind::Backward), count),
+            'T' => self.wait(Pending::Find(FindKind::TillBackward), count),
+            'g' => self.wait(Pending::Goto, count),
+            'v' => {
+                let mode = if self.mode == Mode::Select {
+                    Mode::Normal
+                } else {
+                    Mode::Select
+                };
+                self.set_mode(mode);
+            }
+            'x' => {
+                for _ in 0..count {
+                    select_lines(view);
+                }
+            }
+            '%' => {
+                let len = view.buffer().len();
+                set_ranges(view, vec![range(0, len)], 0);
+            }
+            ';' => to_blocks(view),
+            ',' => {
+                let selection = view.selection();
+                let primary = selection.ranges[selection.primary as usize];
+                set_ranges(view, vec![primary], 0);
+            }
+            'C' => {
+                for _ in 0..count {
+                    copy_to_next_line(view);
+                }
+            }
+            'i' => self.insert_at(view, |range| range.anchor.min(range.head)),
+            'a' => {
                 self.insert_at(view, |range| range.anchor.max(range.head));
                 self.appending = true;
             }
-            KeyCode::Char('o') => self.open_below(view),
-            KeyCode::Char('d') => delete_blocks(view),
-            KeyCode::Char('u') => {
+            'o' => self.open_below(view),
+            'd' => {
+                delete_selections(view);
+                if self.mode == Mode::Select {
+                    self.set_mode(Mode::Normal);
+                }
+            }
+            'u' => {
                 if view.undo() {
                     to_blocks(view);
                 }
             }
-            KeyCode::Char('U') => {
+            'U' => {
                 if view.redo() {
                     to_blocks(view);
                 }
             }
-            KeyCode::Char(':') => self.open_command_line(),
+            ':' => self.open_command_line(),
             _ => return false,
         }
         true
     }
 
+    /// Waits for the next key, keeping the count for it.
+    fn wait(&mut self, pending: Pending, count: u64) {
+        self.pending = Some(pending);
+        self.count = (count > 1).then_some(count);
+    }
+
+    fn pending_key(&mut self, view: &View, pending: Pending, ev: KeyEvent) {
+        let count = self.count.take();
+        let Some(c) = plain(&ev) else {
+            return;
+        };
+        match pending {
+            Pending::Find(kind) => {
+                self.motion(view, count.unwrap_or(1), |doc, pos| {
+                    doc::find_char(doc, pos, c, kind)
+                });
+            }
+            Pending::Goto => {
+                let goto: fn(&Doc, u64, Option<u64>) -> u64 = match c {
+                    'g' => |doc, _, count| doc.line_start(count.map_or(0, |n| n.saturating_sub(1))),
+                    'e' => |doc, _, _| doc.line_start(last_line(doc)),
+                    'h' => |doc, pos, _| doc.line_start(doc.line_of(pos)),
+                    'l' => |doc, pos, _| {
+                        let (start, end) = (doc.line_start(doc.line_of(pos)), doc.line_end(pos));
+                        if end > start {
+                            doc.prev_grapheme(end)
+                        } else {
+                            start
+                        }
+                    },
+                    's' => |doc, pos, _| doc::first_non_blank(doc, pos),
+                    _ => return,
+                };
+                self.move_cursors(view, 1, |doc, pos| goto(doc, pos, count));
+            }
+        }
+    }
+
+    /// Moves every cursor with `to`, `count` times. In select mode the
+    /// selections grow instead.
+    fn move_cursors(&mut self, view: &View, count: u64, to: impl Fn(&Doc, u64) -> u64) {
+        let doc = Doc::new(view.buffer());
+        let select = self.mode == Mode::Select;
+        let ranges = view
+            .selection()
+            .ranges
+            .iter()
+            .map(|r| {
+                let mut pos = cursor(&doc, r);
+                for _ in 0..count {
+                    pos = to(&doc, pos);
+                }
+                if select {
+                    extend(&doc, r, pos)
+                } else {
+                    block(&doc, pos)
+                }
+            })
+            .collect();
+        set_ranges(view, ranges, view.selection().primary);
+    }
+
+    /// Replaces every range with what `motion` selects from its cursor,
+    /// `count` times. In select mode the selections grow instead.
+    fn motion(
+        &mut self,
+        view: &View,
+        count: u64,
+        motion: impl Fn(&Doc, u64) -> Option<(u64, u64)>,
+    ) {
+        let doc = Doc::new(view.buffer());
+        let select = self.mode == Mode::Select;
+        let ranges = view
+            .selection()
+            .ranges
+            .iter()
+            .map(|r| {
+                let mut new = *r;
+                for _ in 0..count {
+                    match motion(&doc, cursor(&doc, &new)) {
+                        Some((anchor, head)) if anchor != head => new = range(anchor, head),
+                        _ => break,
+                    }
+                }
+                if select {
+                    extend(&doc, r, cursor(&doc, &new))
+                } else {
+                    new
+                }
+            })
+            .collect();
+        set_ranges(view, ranges, view.selection().primary);
+    }
+
+    /// Scrolls, then moves each cursor as many lines, keeping it inside the
+    /// scroll margin so the core does not scroll the view back to it.
+    fn scroll(&mut self, view: &View, amount: ScrollAmount) {
+        let lines = view.scroll(amount);
+        let doc = Doc::new(view.buffer());
+        let (start, end) = view.visible_range();
+        let top = doc.line_of(start);
+        let bottom = doc.line_of(end.saturating_sub(1).max(start));
+        let rows = bottom - top + 1;
+        let margin: u64 = settings::get("scroll-margin")
+            .and_then(|m| m.parse().ok())
+            .unwrap_or(0)
+            .min(rows.saturating_sub(1) / 2);
+        // No margin is needed where the view cannot scroll further.
+        let low = if top == 0 { 0 } else { top + margin };
+        let high = if bottom >= last_line(&doc) {
+            bottom
+        } else {
+            bottom - margin
+        };
+        let selection = view.selection();
+        let target = |r: &SelRange| {
+            let line = doc.line_of(cursor(&doc, r)) as i64;
+            let wanted = (line + i64::from(lines)).clamp(low as i64, high.max(low) as i64);
+            (wanted - line) as i32
+        };
+        let moves: Vec<i32> = selection.ranges.iter().map(target).collect();
+        let mut column = self.column;
+        let ranges = selection
+            .ranges
+            .iter()
+            .zip(moves)
+            .map(
+                |(r, lines)| match view.move_vertically(cursor(&doc, r), lines, column) {
+                    Ok((pos, aimed)) => {
+                        column = Some(aimed);
+                        if self.mode == Mode::Select {
+                            extend(&doc, r, pos)
+                        } else {
+                            block(&doc, pos)
+                        }
+                    }
+                    Err(_) => *r,
+                },
+            )
+            .collect();
+        set_ranges(view, ranges, selection.primary);
+        self.column = column;
+    }
+
     fn move_lines(&mut self, view: &View, lines: i32) {
-        let buffer = view.buffer();
+        let doc = Doc::new(view.buffer());
+        let select = self.mode == Mode::Select;
         let mut column = self.column;
         let ranges = view
             .selection()
             .ranges
             .iter()
-            .map(|range| {
-                let pos = cursor(&buffer, range);
-                match view.move_vertically(pos, lines, column) {
+            .map(
+                |r| match view.move_vertically(cursor(&doc, r), lines, column) {
                     Ok((pos, aimed)) => {
                         column = Some(aimed);
-                        block(&buffer, pos)
+                        if select {
+                            extend(&doc, r, pos)
+                        } else {
+                            block(&doc, pos)
+                        }
                     }
-                    Err(_) => *range,
-                }
-            })
+                    Err(_) => *r,
+                },
+            )
             .collect();
-        set_ranges(view, ranges);
+        set_ranges(view, ranges, view.selection().primary);
         self.column = column;
     }
 
     fn insert_at(&mut self, view: &View, at: impl Fn(&SelRange) -> u64) {
-        let ranges = view
-            .selection()
-            .ranges
-            .iter()
-            .map(|range| point(at(range)))
-            .collect();
-        set_ranges(view, ranges);
+        let selection = view.selection();
+        let ranges = selection.ranges.iter().map(|r| point(at(r))).collect();
+        set_ranges(view, ranges, selection.primary);
         self.start_insert();
     }
 
@@ -181,118 +449,99 @@ impl Helix {
 
     /// Opens a line below each cursor, indented like the cursor's line.
     fn open_below(&mut self, view: &View) {
-        let buffer = view.buffer();
-        let edits: Vec<Edit> = view
-            .selection()
+        let doc = Doc::new(view.buffer());
+        let selection = view.selection();
+        let edits: Vec<Edit> = selection
             .ranges
             .iter()
-            .map(|range| {
-                let pos = cursor(&buffer, range);
-                let end = line_end(&buffer, pos);
-                let text = format!("\n{}", indentation(&buffer, pos));
-                // Put the cursor after the insertion by making it the edit
-                // point; the mapped point moves past inserted text.
-                Edit {
-                    start: end,
-                    end,
-                    text,
-                }
+            .map(|r| {
+                let pos = cursor(&doc, r);
+                let end = doc.line_end(pos);
+                insertion(end, format!("\n{}", doc::indentation(&doc, pos)))
             })
             .collect();
-        let ranges = edits
-            .iter()
-            .map(|edit| point(edit.start))
-            .collect::<Vec<_>>();
-        set_ranges(view, ranges);
+        // Points at the line ends move past the inserted text.
+        let ranges = edits.iter().map(|edit| point(edit.start)).collect();
+        set_ranges(view, ranges, selection.primary);
         self.start_insert();
         self.edit(view, &edits);
     }
 
     fn insert_key(&mut self, view: &View, ev: KeyEvent) -> bool {
-        let plain = ev.modifiers.is_empty();
         match ev.code {
             KeyCode::Escape => {
                 if self.appending {
-                    move_blocks(view, |buffer, pos| buffer.prev_grapheme(pos).unwrap_or(pos));
+                    self.appending = false;
+                    let doc = Doc::new(view.buffer());
+                    let selection = view.selection();
+                    let ranges = selection
+                        .ranges
+                        .iter()
+                        .map(|r| block(&doc, doc.prev_grapheme(r.head)))
+                        .collect();
+                    set_ranges(view, ranges, selection.primary);
                 } else {
                     to_blocks(view);
                 }
                 self.set_mode(Mode::Normal);
             }
-            KeyCode::Char(c) if plain => self.insert_text(view, &c.to_string()),
+            KeyCode::Char(c) if ev.modifiers.is_empty() => self.insert_text(view, &c.to_string()),
             KeyCode::Enter => {
-                let buffer = view.buffer();
+                let doc = Doc::new(view.buffer());
                 let edits: Vec<Edit> = view
                     .selection()
                     .ranges
                     .iter()
-                    .map(|range| {
-                        let text = format!("\n{}", indentation(&buffer, range.head));
-                        Edit {
-                            start: range.head,
-                            end: range.head,
-                            text,
-                        }
-                    })
+                    .map(|r| insertion(r.head, format!("\n{}", doc::indentation(&doc, r.head))))
                     .collect();
                 self.edit(view, &edits);
             }
-            KeyCode::Tab => {
-                let indent = match settings::get("indent").as_deref() {
-                    Some("\"tab\"") => "\t".to_string(),
-                    Some(n) => " ".repeat(n.parse().unwrap_or(4)),
-                    None => "    ".to_string(),
-                };
-                self.insert_text(view, &indent);
-            }
+            KeyCode::Tab => self.insert_text(view, &indent_unit()),
             KeyCode::Backspace => {
-                let buffer = view.buffer();
-                let edits = deletions(view, |range| {
-                    let start = buffer.prev_grapheme(range.head).ok()?;
-                    (start < range.head).then_some((start, range.head))
+                let doc = Doc::new(view.buffer());
+                let edits = edits_for(view, |r| {
+                    let start = doc.prev_grapheme(r.head);
+                    (start < r.head).then(|| deletion(start, r.head))
                 });
                 self.edit(view, &edits);
             }
             KeyCode::Delete => {
-                let buffer = view.buffer();
-                let edits = deletions(view, |range| {
-                    let end = buffer.next_grapheme(range.head).ok()?;
-                    (end > range.head).then_some((range.head, end))
+                let doc = Doc::new(view.buffer());
+                let edits = edits_for(view, |r| {
+                    let end = doc.next_grapheme(r.head);
+                    (end > r.head).then(|| deletion(r.head, end))
                 });
                 self.edit(view, &edits);
             }
             KeyCode::Left | KeyCode::Right => {
-                let buffer = view.buffer();
+                let doc = Doc::new(view.buffer());
                 let left = ev.code == KeyCode::Left;
-                let ranges = view
-                    .selection()
+                let selection = view.selection();
+                let ranges = selection
                     .ranges
                     .iter()
-                    .map(|range| {
-                        let moved = if left {
-                            buffer.prev_grapheme(range.head)
+                    .map(|r| {
+                        point(if left {
+                            doc.prev_grapheme(r.head)
                         } else {
-                            buffer.next_grapheme(range.head)
-                        };
-                        point(moved.unwrap_or(range.head))
+                            doc.next_grapheme(r.head)
+                        })
                     })
                     .collect();
-                set_ranges(view, ranges);
+                set_ranges(view, ranges, selection.primary);
             }
             KeyCode::Up | KeyCode::Down => {
                 let lines = if ev.code == KeyCode::Up { -1 } else { 1 };
-                let ranges = view
-                    .selection()
+                let selection = view.selection();
+                let ranges = selection
                     .ranges
                     .iter()
-                    .map(
-                        |range| match view.move_vertically(range.head, lines, None) {
-                            Ok((pos, _)) => point(pos),
-                            Err(_) => *range,
-                        },
-                    )
+                    .map(|r| match view.move_vertically(r.head, lines, None) {
+                        Ok((pos, _)) => point(pos),
+                        Err(_) => *r,
+                    })
                     .collect();
-                set_ranges(view, ranges);
+                set_ranges(view, ranges, selection.primary);
             }
             _ => return false,
         }
@@ -304,11 +553,7 @@ impl Helix {
             .selection()
             .ranges
             .iter()
-            .map(|range| Edit {
-                start: range.head,
-                end: range.head,
-                text: text.to_string(),
-            })
+            .map(|r| insertion(r.head, text.to_string()))
             .collect();
         self.edit(view, &edits);
     }
@@ -353,9 +598,7 @@ impl Helix {
             KeyCode::Backspace => {
                 line.input.pop();
             }
-            KeyCode::Char(c) if ev.modifiers.is_empty() || ev.modifiers == Modifiers::SHIFT => {
-                line.input.push(c);
-            }
+            KeyCode::Char(c) if ev.modifiers.is_empty() => line.input.push(c),
             _ => {}
         }
         if let Some(line) = &self.command_line {
@@ -412,6 +655,15 @@ fn json_string(s: &str) -> String {
     out
 }
 
+/// The text Tab inserts, from the core's indent setting.
+fn indent_unit() -> String {
+    match settings::get("indent").as_deref() {
+        Some("\"tab\"") => "\t".to_string(),
+        Some(n) => " ".repeat(n.parse().unwrap_or(4)),
+        None => "    ".to_string(),
+    }
+}
+
 fn span(text: &str, style: &str) -> Span {
     Span {
         text: text.into(),
@@ -419,58 +671,155 @@ fn span(text: &str, style: &str) -> Span {
     }
 }
 
+fn range(anchor: u64, head: u64) -> SelRange {
+    SelRange { anchor, head }
+}
+
 fn point(pos: u64) -> SelRange {
-    SelRange {
-        anchor: pos,
-        head: pos,
+    range(pos, pos)
+}
+
+fn insertion(pos: u64, text: String) -> Edit {
+    Edit {
+        start: pos,
+        end: pos,
+        text,
+    }
+}
+
+fn deletion(start: u64, end: u64) -> Edit {
+    Edit {
+        start,
+        end,
+        text: String::new(),
     }
 }
 
 /// A block over the grapheme at `pos`, or a point at the end of the text.
-fn block(buffer: &Buffer, pos: u64) -> SelRange {
-    let end = buffer.next_grapheme(pos).unwrap_or(pos);
-    SelRange {
-        anchor: pos,
-        head: end,
-    }
+fn block(doc: &Doc, pos: u64) -> SelRange {
+    range(pos, doc.next_grapheme(pos))
 }
 
-/// Where the cursor of `range` is drawn: on the last grapheme of a forward
+/// Where the cursor of `r` is drawn: on the last grapheme of a forward
 /// range, as the core draws it.
-fn cursor(buffer: &Buffer, range: &SelRange) -> u64 {
-    if range.head > range.anchor {
-        buffer.prev_grapheme(range.head).unwrap_or(range.head)
+fn cursor(doc: &Doc, r: &SelRange) -> u64 {
+    if r.head > r.anchor {
+        doc.prev_grapheme(r.head)
     } else {
-        range.head
+        r.head
     }
 }
 
-fn move_blocks(view: &View, to: impl Fn(&Buffer, u64) -> u64) {
-    let buffer = view.buffer();
-    let ranges = view
-        .selection()
-        .ranges
-        .iter()
-        .map(|range| block(&buffer, to(&buffer, cursor(&buffer, range))))
-        .collect();
-    set_ranges(view, ranges);
+/// `r` grown so its cursor is at `pos`, keeping the grapheme at its anchor
+/// side selected.
+fn extend(doc: &Doc, r: &SelRange, pos: u64) -> SelRange {
+    let anchor = if r.head >= r.anchor {
+        r.anchor
+    } else {
+        doc.prev_grapheme(r.anchor)
+    };
+    if pos >= anchor {
+        range(anchor, doc.next_grapheme(pos))
+    } else {
+        range(doc.next_grapheme(anchor), pos)
+    }
+}
+
+/// The next grapheme, but not past the last one: the cursor stays on text.
+fn next_char(doc: &Doc, pos: u64) -> u64 {
+    let next = doc.next_grapheme(pos);
+    if next < doc.len { next } else { pos }
+}
+
+/// The last line with text: a final line break does not start a new line
+/// to jump to.
+fn last_line(doc: &Doc) -> u64 {
+    let last = doc.line_count().saturating_sub(1);
+    if last > 0 && doc.line_start(last) == doc.len {
+        last - 1
+    } else {
+        last
+    }
+}
+
+fn set_ranges(view: &View, ranges: Vec<SelRange>, primary: u32) {
+    let primary = primary.min(ranges.len().saturating_sub(1) as u32);
+    let _ = view.set_selection(&Selection { ranges, primary });
 }
 
 /// Turns every range into a block at its cursor, as after leaving insert
 /// mode or undoing.
 fn to_blocks(view: &View) {
-    move_blocks(view, |_, pos| pos);
+    let doc = Doc::new(view.buffer());
+    let selection = view.selection();
+    let ranges = selection
+        .ranges
+        .iter()
+        .map(|r| block(&doc, cursor(&doc, r)))
+        .collect();
+    set_ranges(view, ranges, selection.primary);
 }
 
-fn set_ranges(view: &View, ranges: Vec<SelRange>) {
-    let primary = view.selection().primary;
-    let _ = view.set_selection(&Selection { ranges, primary });
+fn flip_selections(view: &View) {
+    let selection = view.selection();
+    let ranges = selection
+        .ranges
+        .iter()
+        .map(|r| range(r.head, r.anchor))
+        .collect();
+    set_ranges(view, ranges, selection.primary);
 }
 
-fn delete_blocks(view: &View) {
-    let edits = deletions(view, |range| {
-        let (start, end) = (range.anchor.min(range.head), range.anchor.max(range.head));
-        (start < end).then_some((start, end))
+/// `x`: selects the lines of each range, or one more line when whole lines
+/// are selected already.
+fn select_lines(view: &View) {
+    let doc = Doc::new(view.buffer());
+    let selection = view.selection();
+    let ranges = selection
+        .ranges
+        .iter()
+        .map(|r| {
+            let (from, to) = (r.anchor.min(r.head), r.anchor.max(r.head));
+            let start = doc.line_start(doc.line_of(from));
+            let whole_lines =
+                from == start && to > from && to < doc.len && doc.line_start(doc.line_of(to)) == to;
+            let last = if whole_lines {
+                to
+            } else {
+                doc.prev_grapheme(to).max(from)
+            };
+            let end = (doc.line_end(last) + 1).min(doc.len);
+            range(start, end)
+        })
+        .collect();
+    set_ranges(view, ranges, selection.primary);
+}
+
+/// `C`: adds a cursor on the line below each range's cursor.
+fn copy_to_next_line(view: &View) {
+    let doc = Doc::new(view.buffer());
+    let selection = view.selection();
+    let mut ranges = selection.ranges.clone();
+    let mut primary = selection.primary;
+    for (i, r) in selection.ranges.iter().enumerate() {
+        let pos = cursor(&doc, r);
+        let Ok((below, _)) = view.move_vertically(pos, 1, None) else {
+            continue;
+        };
+        if doc.line_of(below) != doc.line_of(pos) {
+            ranges.push(block(&doc, below));
+            if i as u32 == selection.primary {
+                primary = (ranges.len() - 1) as u32;
+            }
+        }
+    }
+    set_ranges(view, ranges, primary);
+}
+
+fn delete_selections(view: &View) {
+    let edits = edits_for(view, |r| {
+        let (from, to) = (r.anchor.min(r.head), r.anchor.max(r.head));
+        (from < to).then(|| deletion(from, to))
     });
     if edits.is_empty() {
         return;
@@ -481,37 +830,6 @@ fn delete_blocks(view: &View) {
     }
 }
 
-fn deletions(view: &View, range_to_delete: impl Fn(&SelRange) -> Option<(u64, u64)>) -> Vec<Edit> {
-    view.selection()
-        .ranges
-        .iter()
-        .filter_map(range_to_delete)
-        .map(|(start, end)| Edit {
-            start,
-            end,
-            text: String::new(),
-        })
-        .collect()
-}
-
-/// The position of the line break ending the line of `pos`, or the end of
-/// the text.
-fn line_end(buffer: &Buffer, pos: u64) -> u64 {
-    let line = buffer.line_of(pos).unwrap_or(0);
-    match buffer.line_start(line + 1) {
-        Some(next) => next - 1,
-        None => buffer.len(),
-    }
-}
-
-/// The leading whitespace of the line of `pos`.
-fn indentation(buffer: &Buffer, pos: u64) -> String {
-    let line = buffer.line_of(pos).unwrap_or(0);
-    let start = buffer.line_start(line).unwrap_or(0);
-    let text = buffer
-        .slice(start, line_end(buffer, pos))
-        .unwrap_or_default();
-    text.chars()
-        .take_while(|c| *c == ' ' || *c == '\t')
-        .collect()
+fn edits_for(view: &View, edit: impl Fn(&SelRange) -> Option<Edit>) -> Vec<Edit> {
+    view.selection().ranges.iter().filter_map(edit).collect()
 }

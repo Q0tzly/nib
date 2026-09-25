@@ -92,6 +92,17 @@ impl State {
             .saturating_sub(panels.min(u16::MAX as usize) as u16)
     }
 
+    /// From the start of the first line shown to the end of the last one.
+    pub fn visible_range(&self) -> (usize, usize) {
+        let buffer = &self.buffers[self.view.buffer];
+        let top = self.view.top_line;
+        let start = buffer.line_start(top).unwrap_or(buffer.len());
+        let end = buffer
+            .line_start(top + self.text_rows() as usize)
+            .unwrap_or(buffer.len());
+        (start, end)
+    }
+
     /// Scrolls the view without moving the cursor. Returns the number of
     /// lines `amount` stands for, so a keymap can move the cursor as far.
     pub fn scroll(&mut self, amount: ScrollAmount) -> i32 {

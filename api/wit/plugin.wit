@@ -111,6 +111,9 @@ interface editor {
         /// lines to scroll with it, as Ctrl-d does; the core keeps the
         /// cursor in view either way.
         scroll: func(amount: scroll-amount) -> s32;
+        /// The part of the buffer on screen: from the start of the first line
+        /// shown to the end of the last one.
+        visible-range: func() -> tuple<offset, offset>;
     }
 
     active-view: func() -> view;

@@ -300,6 +300,11 @@ impl editor::HostView for PluginData {
         }))
     }
 
+    fn visible_range(&mut self, view: Resource<ViewHandle>) -> HostResult<(u64, u64)> {
+        let (start, end) = self.view_state(&view)?.visible_range();
+        Ok((start as u64, end as u64))
+    }
+
     fn set_cursor_shape(
         &mut self,
         view: Resource<ViewHandle>,

@@ -397,7 +397,9 @@ pub fn surrounding_pair(doc: &Doc, pos: u64, c: char) -> Option<(u64, u64)> {
         .collect();
     // Quotes pair up from the start of the line.
     quotes
-        .chunks_exact(2)
-        .map(|pair| (pair[0], pair[1]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&[open, close]| (open, close))
         .find(|&(open, close)| open <= pos && pos <= close)
 }

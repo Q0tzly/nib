@@ -1,0 +1,153 @@
+//! Subcommands that do not start the editor: `nib config ...` and
+//! `nib plugin ...`.
+
+use std::ffi::OsString;
+use std::fs;
+use std::path::Path;
+use std::process::ExitCode;
+
+use nib_core::Config;
+
+use crate::settings::{self, Source};
+
+pub const USAGE: &str = "usage: nib [--plugin DIR]... [FILE]...
+       nib config path     show where the settings are
+       nib config init     write commented settings files to start from
+       nib plugin list     list the plugins and their settings files";
+
+pub fn config(args: &[OsString]) -> ExitCode {
+    let Some(dir) = settings::config_dir() else {
+        eprintln!("nib: no home directory to keep settings in");
+        return ExitCode::FAILURE;
+    };
+    let result = match args.first().and_then(|a| a.to_str()) {
+        Some("path") => {
+            show_paths(&dir);
+            Ok(())
+        }
+        Some("init") => init(&dir),
+        _ => Err(USAGE.to_string()),
+    };
+    finish(result)
+}
+
+pub fn plugin(args: &[OsString]) -> ExitCode {
+    let result = match args.first().and_then(|a| a.to_str()) {
+        Some("list") => list(),
+        _ => Err(USAGE.to_string()),
+    };
+    finish(result)
+}
+
+fn finish(result: Result<(), String>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("nib: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn show_paths(dir: &Path) {
+    let config = dir.join("config.toml");
+    let state = |exists: bool| if exists { "" } else { " (not created yet)" };
+    println!("config:  {}{}", config.display(), state(config.is_file()));
+    let plugins = dir.join("plugins");
+    match settings::plugin_files(dir) {
+        Ok(files) if !files.is_empty() => {
+            println!("plugins: {}", plugins.display());
+            for (_, path) in files {
+                println!("         {}", path.display());
+            }
+        }
+        _ => println!("plugins: {} (no files yet)", plugins.display()),
+    }
+    if let Some(cache) = settings::cache_dir() {
+        println!("cache:   {}", cache.display());
+    }
+}
+
+/// Writes the templates that do not exist yet, never overwriting a file.
+fn init(dir: &Path) -> Result<(), String> {
+    let plugins = dir.join("plugins");
+    fs::create_dir_all(&plugins).map_err(|err| format!("{}: {err}", plugins.display()))?;
+    let files = [
+        (
+            dir.join("config.toml"),
+            settings::CONFIG_TEMPLATE.to_string(),
+        ),
+        (
+            plugins.join("helix.toml"),
+            settings::plugin_template("helix"),
+        ),
+    ];
+    for (path, template) in files {
+        if path.exists() {
+            println!("kept    {} (already there)", path.display());
+            continue;
+        }
+        fs::write(&path, template).map_err(|err| format!("{}: {err}", path.display()))?;
+        println!("created {}", path.display());
+    }
+    Ok(())
+}
+
+fn list() -> Result<(), String> {
+    let dir = settings::config_dir();
+    let config = match &dir {
+        Some(dir) => settings::load(dir)?,
+        None => Config::default(),
+    };
+    let mut problems = Vec::new();
+    let rows: Vec<[String; 4]> = settings::entries(&config, dir.as_deref())
+        .into_iter()
+        .map(|entry| {
+            let (source, problem) = match &entry.source {
+                Source::Builtin(_) => ("built-in".to_string(), None),
+                Source::Dir(path) => (
+                    path.display().to_string(),
+                    settings::check_name(&entry.name, path).err(),
+                ),
+            };
+            let state = match (problem, entry.enabled) {
+                (Some(problem), _) => {
+                    problems.push(problem);
+                    "error"
+                }
+                (None, true) => "enabled",
+                (None, false) => "disabled",
+            };
+            let file = entry
+                .file
+                .map_or_else(|| "-".into(), |f| f.display().to_string());
+            [entry.name, state.into(), source, file]
+        })
+        .collect();
+    let header = ["NAME", "STATE", "SOURCE", "SETTINGS"].map(String::from);
+    let widths: Vec<usize> = (0..3)
+        .map(|i| {
+            rows.iter()
+                .chain([&header])
+                .map(|row| row[i].len())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    for row in [&header].into_iter().chain(&rows) {
+        println!(
+            "{:w0$}  {:w1$}  {:w2$}  {}",
+            row[0],
+            row[1],
+            row[2],
+            row[3],
+            w0 = widths[0],
+            w1 = widths[1],
+            w2 = widths[2],
+        );
+    }
+    for problem in problems {
+        println!("\nerror: {problem}");
+    }
+    Ok(())
+}

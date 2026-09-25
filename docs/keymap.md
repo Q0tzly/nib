@@ -67,14 +67,14 @@
 
 ## 設定
 
-config.toml の `[plugins.helix]` に書く。キーの書き方は Helix の `[keys.*]` と同じにする。タブ幅やインデントはコアの設定（`[core]`）なので、ここには書かない。
+`~/.config/nib/plugins/helix.toml` の `[settings]` に書く。キーの書き方は Helix の `[keys.*]` と同じにする。タブ幅やインデントはコアの設定（`[core]`）なので、ここには書かない。
 
 ```toml
-[plugins.helix.keys.normal]
+[settings.keys.normal]
 "C-s" = "buffer.save"
 g = { a = "goto_last_accessed_file" }   # 表は前置きキーになる
 
-[plugins.helix.keys.insert]
+[settings.keys.insert]
 j = { k = "normal_mode" }
 ```
 

@@ -101,7 +101,7 @@ fn failing_plugin_is_restarted_then_disabled() {
 #[test]
 fn init_error_is_reported() {
     let mut editor = Editor::default();
-    editor.apply_config(Config::parse("[plugins.test-misbehave]\nfail = true").unwrap());
+    editor.apply_config(with_plugin("test-misbehave", "[settings]\nfail = true"));
     let err = editor
         .load_plugin(&plugin_dir("test-misbehave"))
         .unwrap_err();
@@ -182,6 +182,30 @@ fn core_menu_manages_each_plugin() {
     assert_eq!(editor.message(), Some("test-insert reloaded"));
     editor.handle_key(key('y'));
     assert_eq!(editor.buffer().text().to_string(), "xy");
+}
+
+/// A config with one `plugins/<name>.toml`.
+fn with_plugin(name: &str, text: &str) -> Config {
+    let mut config = Config::default();
+    config
+        .plugins
+        .insert(name.into(), Config::parse_plugin(name, text).unwrap());
+    config
+}
+
+#[test]
+fn a_plugins_own_limit_wins_over_the_default() {
+    let mut config = with_plugin("test-misbehave", "timeout-ms = 50");
+    config.core = Config::parse("[core]\nplugin-timeout-ms = 5000")
+        .unwrap()
+        .core;
+    let mut editor = Editor::default();
+    editor.apply_config(config);
+    editor.load_plugin(&plugin_dir("test-misbehave")).unwrap();
+    assert_eq!(editor.plugins()[0].timeout, Duration::from_millis(50));
+    let started = Instant::now();
+    editor.handle_key(key('l'));
+    assert!(started.elapsed() < Duration::from_millis(500));
 }
 
 #[test]

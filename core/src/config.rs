@@ -1,4 +1,5 @@
-//! `config.toml`: `[core]` for the core, `[plugins.<name>]` for each plugin.
+//! Settings: `config.toml` for the core, and `plugins/<name>.toml` for each
+//! plugin.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -15,7 +16,7 @@ use crate::ui::Theme;
 ///
 /// Editing behavior (`tab_width`, `indent`, `scroll_margin`) is for plugins
 /// to read and, later, to override per buffer. Safety settings (`menu_key`,
-/// `plugin_dirs`, and the plugin limits) are for the user alone.
+/// and the plugin limits) are for the user alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     pub tab_width: u16,
@@ -23,9 +24,8 @@ pub struct Settings {
     /// Lines kept visible above and below the cursor.
     pub scroll_margin: u16,
     pub menu_key: KeyEvent,
-    /// Plugin directories to load besides the built-in plugins.
-    pub plugin_dirs: Vec<PathBuf>,
-    /// A plugin call taking longer is stopped.
+    /// A plugin call taking longer is stopped, unless the plugin's own
+    /// settings say otherwise.
     pub plugin_timeout: Duration,
     pub plugin_init_timeout: Duration,
     /// Maximum size of a plugin's memory, in bytes.
@@ -45,7 +45,6 @@ impl Default for Settings {
             indent: Indent::Spaces(4),
             scroll_margin: 5,
             menu_key: KeyEvent::ctrl('g'),
-            plugin_dirs: Vec::new(),
             plugin_timeout: Duration::from_secs(1),
             plugin_init_timeout: Duration::from_secs(5),
             plugin_memory: 256 << 20,
@@ -72,9 +71,54 @@ impl Settings {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Config {
     pub core: Settings,
-    /// Each plugin's table as JSON, passed to its `init` as is.
-    pub plugins: BTreeMap<String, String>,
     pub theme: Theme,
+    /// From `plugins/<name>.toml`, by plugin name.
+    pub plugins: BTreeMap<String, PluginConfig>,
+}
+
+/// `plugins/<name>.toml`: how nib runs one plugin, and the plugin's own
+/// settings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginConfig {
+    /// Where to load the plugin from; `None` for a built-in one.
+    pub path: Option<PathBuf>,
+    pub enabled: bool,
+    /// Limits for this plugin, instead of the ones in `[core]`.
+    pub timeout: Option<Duration>,
+    pub init_timeout: Option<Duration>,
+    pub memory: Option<usize>,
+    /// `[settings]` as JSON, passed to the plugin's `init` as is.
+    pub settings: String,
+}
+
+impl Default for PluginConfig {
+    fn default() -> Self {
+        Self {
+            path: None,
+            enabled: true,
+            timeout: None,
+            init_timeout: None,
+            memory: None,
+            settings: "{}".into(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawPluginConfig {
+    path: Option<PathBuf>,
+    #[serde(default = "enabled")]
+    enabled: bool,
+    timeout_ms: Option<u64>,
+    init_timeout_ms: Option<u64>,
+    memory_mib: Option<usize>,
+    #[serde(default)]
+    settings: toml::Table,
+}
+
+fn enabled() -> bool {
+    true
 }
 
 #[derive(Default, Deserialize)]
@@ -83,9 +127,9 @@ struct RawConfig {
     #[serde(default)]
     core: RawCore,
     #[serde(default)]
-    plugins: BTreeMap<String, toml::Table>,
-    #[serde(default)]
     theme: BTreeMap<String, RawStyle>,
+    /// Moved to `plugins/<name>.toml`; read only to say so.
+    plugins: Option<toml::Value>,
 }
 
 /// A color alone, or a table with colors and attributes.
@@ -176,7 +220,8 @@ struct RawCore {
     indent: Option<RawIndent>,
     scroll_margin: Option<u16>,
     menu_key: Option<String>,
-    plugin_dirs: Option<Vec<PathBuf>>,
+    /// Moved to `path` in `plugins/<name>.toml`; read only to say so.
+    plugin_dirs: Option<toml::Value>,
     plugin_timeout_ms: Option<u64>,
     plugin_init_timeout_ms: Option<u64>,
     plugin_memory_mib: Option<usize>,
@@ -224,38 +269,26 @@ impl Config {
                 .parse()
                 .map_err(|err| fail(format!("menu-key: {err}")))?;
         }
-        if let Some(dirs) = raw_core.plugin_dirs {
-            core.plugin_dirs = dirs;
+        if raw_core.plugin_dirs.is_some() {
+            return Err(fail(
+                "plugin-dirs moved: write `path = \"...\"` in plugins/<name>.toml".into(),
+            ));
         }
-        let timeout = |name: &str, ms: u64| {
-            if ms < 10 {
-                return Err(fail(format!("{name} must be at least 10, not {ms}")));
-            }
-            Ok(Duration::from_millis(ms))
-        };
+        if raw.plugins.is_some() {
+            return Err(fail(
+                "[plugins.<name>] moved: write [settings] in plugins/<name>.toml".into(),
+            ));
+        }
         if let Some(ms) = raw_core.plugin_timeout_ms {
-            core.plugin_timeout = timeout("plugin-timeout-ms", ms)?;
+            core.plugin_timeout = timeout("plugin-timeout-ms", ms).map_err(fail)?;
         }
         if let Some(ms) = raw_core.plugin_init_timeout_ms {
-            core.plugin_init_timeout = timeout("plugin-init-timeout-ms", ms)?;
+            core.plugin_init_timeout = timeout("plugin-init-timeout-ms", ms).map_err(fail)?;
         }
         if let Some(mib) = raw_core.plugin_memory_mib {
-            if !(16..=4096).contains(&mib) {
-                return Err(fail(format!(
-                    "plugin-memory-mib must be 16 to 4096, not {mib}"
-                )));
-            }
-            core.plugin_memory = mib << 20;
+            core.plugin_memory = memory("plugin-memory-mib", mib).map_err(fail)?;
         }
 
-        let plugins = raw
-            .plugins
-            .into_iter()
-            .map(|(name, table)| {
-                let json = serde_json::to_string(&table).map_err(|err| fail(err.to_string()))?;
-                Ok((name, json))
-            })
-            .collect::<Result<_, Error>>()?;
         let theme = raw
             .theme
             .iter()
@@ -267,9 +300,49 @@ impl Config {
             .collect::<Result<_, Error>>()?;
         Ok(Self {
             core,
-            plugins,
             theme: Theme::new(theme),
+            plugins: BTreeMap::new(),
         })
+    }
+
+    /// Parses `plugins/<name>.toml`.
+    pub fn parse_plugin(name: &str, text: &str) -> Result<PluginConfig, Error> {
+        let fail = |message: String| Error::Config(format!("plugins/{name}.toml: {message}"));
+        let raw: RawPluginConfig = toml::from_str(text).map_err(|err| fail(err.to_string()))?;
+        let limit = |ms: Option<u64>, key| ms.map(|ms| timeout(key, ms)).transpose();
+        Ok(PluginConfig {
+            path: raw.path,
+            enabled: raw.enabled,
+            timeout: limit(raw.timeout_ms, "timeout-ms").map_err(fail)?,
+            init_timeout: limit(raw.init_timeout_ms, "init-timeout-ms").map_err(fail)?,
+            memory: raw
+                .memory_mib
+                .map(|mib| memory("memory-mib", mib))
+                .transpose()
+                .map_err(fail)?,
+            settings: serde_json::to_string(&raw.settings).map_err(|err| fail(err.to_string()))?,
+        })
+    }
+}
+
+fn timeout(key: &str, ms: u64) -> Result<Duration, String> {
+    if ms < 10 {
+        return Err(format!("{key} must be at least 10, not {ms}"));
+    }
+    Ok(Duration::from_millis(ms))
+}
+
+fn memory(key: &str, mib: usize) -> Result<usize, String> {
+    if !(16..=4096).contains(&mib) {
+        return Err(format!("{key} must be 16 to 4096, not {mib}"));
+    }
+    Ok(mib << 20)
+}
+
+impl Config {
+    /// The plugin's settings, or the defaults when it has no file.
+    pub fn plugin(&self, name: &str) -> PluginConfig {
+        self.plugins.get(name).cloned().unwrap_or_default()
     }
 }
 
@@ -291,29 +364,56 @@ mod tests {
             tab-width = 8
             indent = "tab"
             menu-key = "C-]"
-            plugin-dirs = ["~/dev/my-plugin"]
             plugin-timeout-ms = 2000
             plugin-memory-mib = 512
-
-            [plugins.helix]
-            keys.normal = { "C-s" = "buffer.save" }
             "#,
         )
         .unwrap();
         assert_eq!(config.core.tab_width, 8);
         assert_eq!(config.core.indent, Indent::Tab);
         assert_eq!(config.core.menu_key, KeyEvent::ctrl(']'));
-        assert_eq!(
-            config.core.plugin_dirs,
-            vec![PathBuf::from("~/dev/my-plugin")]
-        );
         assert_eq!(config.core.plugin_timeout, Duration::from_secs(2));
         assert_eq!(config.core.plugin_init_timeout, Duration::from_secs(5));
         assert_eq!(config.core.plugin_memory, 512 << 20);
+    }
+
+    #[test]
+    fn parses_plugin_files() {
+        let plugin = Config::parse_plugin(
+            "lsp",
+            r#"
+            path = "~/dev/nib-lsp"
+            timeout-ms = 2000
+            memory-mib = 512
+
+            [settings]
+            server = "rust-analyzer"
+            keys.normal = { "C-s" = "buffer.save" }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(plugin.path, Some(PathBuf::from("~/dev/nib-lsp")));
+        assert!(plugin.enabled);
+        assert_eq!(plugin.timeout, Some(Duration::from_secs(2)));
+        assert_eq!(plugin.init_timeout, None);
+        assert_eq!(plugin.memory, Some(512 << 20));
         assert_eq!(
-            config.plugins["helix"],
-            r#"{"keys":{"normal":{"C-s":"buffer.save"}}}"#
+            plugin.settings,
+            r#"{"keys":{"normal":{"C-s":"buffer.save"}},"server":"rust-analyzer"}"#
         );
+
+        let empty = Config::parse_plugin("helix", "").unwrap();
+        assert_eq!(empty, PluginConfig::default());
+        let err = Config::parse_plugin("x", "enable = false").unwrap_err();
+        assert!(err.to_string().contains("plugins/x.toml: "), "{err}");
+    }
+
+    #[test]
+    fn says_where_old_settings_moved() {
+        let err = Config::parse("[core]\nplugin-dirs = []").unwrap_err();
+        assert!(err.to_string().contains("plugin-dirs moved"), "{err}");
+        let err = Config::parse("[plugins.helix]\nx = 1").unwrap_err();
+        assert!(err.to_string().contains("[plugins.<name>] moved"), "{err}");
     }
 
     #[test]

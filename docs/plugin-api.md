@@ -66,7 +66,7 @@ interface guest {
 
     enum key-result { handled, pass }
 
-    /// 読み込み直後に 1 回呼ぶ。config は config.toml のプラグイン用の表を JSON にしたもの
+    /// 読み込み直後に 1 回呼ぶ。config は plugins/<name>.toml の [settings] を JSON にしたもの
     init: func(config: string) -> result<_, string>;
 
     /// 入力スタックに積んだ層にキーが届いたとき

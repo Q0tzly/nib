@@ -1,4 +1,6 @@
+mod commands;
 mod draw;
+mod settings;
 mod terminal;
 
 mod builtin {
@@ -6,23 +8,32 @@ mod builtin {
 }
 
 use std::env;
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use nib_core::{Config, Editor, plugin_name};
 
-const USAGE: &str = "usage: nib [--plugin DIR]... [FILE]...";
+use settings::{Entry, Source};
 
 fn main() -> ExitCode {
+    let args: Vec<_> = env::args_os().skip(1).collect();
+    match args.first().and_then(|a| a.to_str()) {
+        Some("config") => return commands::config(&args[1..]),
+        Some("plugin") => return commands::plugin(&args[1..]),
+        Some("--help" | "-h") => {
+            println!("{}", commands::USAGE);
+            return ExitCode::SUCCESS;
+        }
+        _ => {}
+    }
+
     let mut files = Vec::new();
     let mut plugins = Vec::new();
-    let mut args = env::args_os().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         if arg == "--plugin" {
             let Some(dir) = args.next() else {
-                eprintln!("nib: --plugin needs a directory\n{USAGE}");
+                eprintln!("nib: --plugin needs a directory\n{}", commands::USAGE);
                 return ExitCode::FAILURE;
             };
             plugins.push(PathBuf::from(dir));
@@ -32,30 +43,24 @@ fn main() -> ExitCode {
     }
 
     let mut editor = Editor::default();
-    // A broken config should not keep the editor from starting: fall back to
+    // Broken settings should not keep the editor from starting: fall back to
     // the defaults and say why.
-    let config_error = match load_config() {
-        Ok(config) => {
-            editor.apply_config(config);
-            None
-        }
-        Err(err) => Some(err),
+    let dir = settings::config_dir();
+    let (config, config_error) = match dir.as_deref().map(settings::load) {
+        Some(Ok(config)) => (config, None),
+        Some(Err(err)) => (Config::default(), Some(err)),
+        None => (Config::default(), None),
     };
+    let entries = settings::entries(&config, dir.as_deref());
+    editor.apply_config(config);
     for path in &files {
         if let Err(err) = editor.open(path) {
             eprintln!("nib: {}: {err}", path.display());
             return ExitCode::FAILURE;
         }
     }
-    editor.set_plugin_cache_dir(cache_dir());
-    let configured: Vec<PathBuf> = editor
-        .settings()
-        .plugin_dirs
-        .iter()
-        .map(|dir| expand_home(dir))
-        .chain(plugins)
-        .collect();
-    if let Err(err) = load_plugins(&mut editor, &configured) {
+    editor.set_plugin_cache_dir(settings::cache_dir());
+    if let Err(err) = load_plugins(&mut editor, entries, &plugins) {
         eprintln!("nib: {err}");
         return ExitCode::FAILURE;
     }
@@ -74,60 +79,35 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Loads the built-in plugins first, so the keymap is at the bottom of the
-/// input stack, then `dirs`. A plugin in `dirs` replaces a built-in one of
-/// the same name, e.g. while working on it.
-fn load_plugins(editor: &mut Editor, dirs: &[PathBuf]) -> Result<(), nib_core::Error> {
-    let replaced = dirs
+/// Loads the enabled plugins in order, then the `--plugin` ones, which
+/// replace a plugin of the same name, e.g. while working on it.
+fn load_plugins(editor: &mut Editor, entries: Vec<Entry>, extra: &[PathBuf]) -> Result<(), String> {
+    let replaced = extra
         .iter()
         .map(|dir| plugin_name(dir))
-        .collect::<Result<Vec<_>, _>>()?;
-    for (name, manifest, files) in builtin::PLUGINS {
-        if !replaced.iter().any(|r| r == name) {
-            editor.load_builtin_plugin(manifest, files)?;
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())?;
+    for entry in entries {
+        if !entry.enabled || replaced.contains(&entry.name) {
+            continue;
         }
+        match entry.source {
+            Source::Builtin(i) => {
+                let (_, manifest, files) = builtin::PLUGINS[i];
+                editor.load_builtin_plugin(manifest, files)
+            }
+            Source::Dir(dir) => {
+                settings::check_name(&entry.name, &dir)?;
+                editor.load_plugin(&dir)
+            }
+        }
+        .map_err(|err| err.to_string())?;
     }
-    for dir in dirs {
-        editor.load_plugin(dir)?;
+    for dir in extra {
+        editor.load_plugin(dir).map_err(|err| err.to_string())?;
     }
     if builtin::PLUGINS.is_empty() {
         editor.show_message("built without the standard plugins; run `cargo xtask build-plugins`");
     }
     Ok(())
-}
-
-fn load_config() -> Result<Config, String> {
-    let Some(path) = config_dir().map(|dir| dir.join("config.toml")) else {
-        return Ok(Config::default());
-    };
-    match fs::read_to_string(&path) {
-        Ok(text) => Config::parse(&text).map_err(|err| err.to_string()),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Config::default()),
-        Err(err) => Err(format!("{}: {err}", path.display())),
-    }
-}
-
-fn config_dir() -> Option<PathBuf> {
-    let base = env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .or_else(|| env::var_os("APPDATA").map(PathBuf::from))?;
-    Some(base.join("nib"))
-}
-
-/// Where compiled plugins are cached, so later starts skip compiling.
-fn cache_dir() -> Option<PathBuf> {
-    let base = env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
-        .or_else(|| env::var_os("LOCALAPPDATA").map(PathBuf::from))?;
-    Some(base.join("nib"))
-}
-
-/// Expands a leading `~/`, as plugin paths in config.toml are often written.
-fn expand_home(path: &Path) -> PathBuf {
-    match (path.strip_prefix("~"), env::var_os("HOME")) {
-        (Ok(rest), Some(home)) => PathBuf::from(home).join(rest),
-        _ => path.to_path_buf(),
-    }
 }

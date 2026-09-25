@@ -56,10 +56,11 @@ impl Editor {
                     (None, false) => "disabled".to_string(),
                 };
                 let text = format!(
-                    " {}  {:<12} {:<8} slow calls: {:<4} {state}",
+                    " {}  {:<12} {:<8} limit: {:<7} slow calls: {:<4} {state}",
                     id + 1,
                     plugin.name,
                     plugin.version,
+                    format!("{}ms", plugin.timeout.as_millis()),
                     plugin.slow_calls,
                 );
                 let style = if selected == Some(id) {

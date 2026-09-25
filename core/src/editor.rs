@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::Error;
 use crate::buffer::Buffer;
-use crate::config::{Config, Settings};
+use crate::config::{Config, PluginConfig, Settings};
 use crate::input::{KeyCode, KeyEvent};
 use crate::layout;
 use crate::plugin::{PluginId, Plugins};
@@ -255,8 +255,8 @@ pub struct Editor {
     /// editor.
     pub(crate) state: Option<State>,
     pub(crate) plugins: Plugins,
-    /// Each plugin's table from config.toml as JSON.
-    plugin_configs: BTreeMap<String, String>,
+    /// From `plugins/<name>.toml`, by plugin name.
+    plugin_configs: BTreeMap<String, PluginConfig>,
 }
 
 const LENT: &str = "editor state is only lent during plugin calls";
@@ -313,9 +313,9 @@ impl Editor {
         &self.state().settings
     }
 
-    /// The plugin's table from config.toml as JSON, or `{}`.
-    pub fn plugin_config(&self, name: &str) -> &str {
-        self.plugin_configs.get(name).map_or("{}", String::as_str)
+    /// The plugin's `plugins/<name>.toml`, or the defaults.
+    pub fn plugin_config(&self, name: &str) -> PluginConfig {
+        self.plugin_configs.get(name).cloned().unwrap_or_default()
     }
 
     /// Opens `path` in the view. The initial empty buffer is replaced if it

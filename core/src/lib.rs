@@ -20,7 +20,7 @@ pub mod view;
 
 pub use buffer::{Buffer, Change, LineEnding};
 pub use change::{Assoc, ChangeSet, Edit};
-pub use config::{Config, Indent, Settings};
+pub use config::{Config, Indent, PluginConfig, Settings};
 pub use editor::{Editor, Menu, ScrollAmount};
 pub use error::Error;
 pub use grid::{Cell, Color, Cursor, CursorShape, Grid, Style, Symbol};

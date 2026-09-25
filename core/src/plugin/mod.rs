@@ -77,6 +77,8 @@ pub struct PluginInfo {
     pub reloadable: bool,
     /// Has code to run; otherwise it only provides data, such as languages.
     pub has_code: bool,
+    /// A call taking longer is stopped.
+    pub timeout: Duration,
 }
 
 /// Where a plugin's manifest and code come from.
@@ -177,12 +179,23 @@ struct Plugin {
     dir: Option<PathBuf>,
     /// `None` for plugins that only provide data, such as languages.
     component: Option<Component>,
+    /// `[settings]` from its `plugins/<name>.toml`, as JSON.
     config: String,
+    limits: Limits,
     instance: Option<Instance>,
     enabled: bool,
     crashes: Vec<Instant>,
     slow_calls: u32,
     last_error: Option<String>,
+}
+
+/// Limits for one plugin: its own from `plugins/<name>.toml`, or the
+/// defaults.
+#[derive(Clone, Copy)]
+struct Limits {
+    call: Duration,
+    init: Duration,
+    memory: usize,
 }
 
 struct Instance {
@@ -263,6 +276,13 @@ impl Editor {
         }
         self.add_languages(&manifest, &source)
             .map_err(|err| Error::Plugin(format!("{}: {err}", manifest.name)))?;
+        let settings = self.plugin_config(&manifest.name);
+        let options = &self.plugins.options;
+        let limits = Limits {
+            call: settings.timeout.unwrap_or(options.call_timeout),
+            init: settings.init_timeout.unwrap_or(options.init_timeout),
+            memory: settings.memory.unwrap_or(options.memory_limit),
+        };
         let id = self.plugins.entries.len();
         self.plugins.entries.push(Plugin {
             name: manifest.name.clone(),
@@ -272,7 +292,8 @@ impl Editor {
                 Source::Bytes { .. } => None,
             },
             component,
-            config: self.plugin_config(&manifest.name).to_string(),
+            config: settings.settings,
+            limits,
             instance: None,
             enabled: true,
             crashes: Vec::new(),
@@ -419,6 +440,7 @@ impl Editor {
                 last_error: p.last_error.clone(),
                 reloadable: p.dir.is_some(),
                 has_code: p.component.is_some(),
+                timeout: p.limits.call,
             })
             .collect()
     }
@@ -441,8 +463,8 @@ impl Editor {
             return Ok(());
         };
         let runtime = self.plugins.runtime.as_ref().expect("runtime exists");
-        let options = &self.plugins.options;
         let plugin = &mut self.plugins.entries[id];
+        let limits = plugin.limits;
 
         let stderr = MemoryOutputPipe::new(STDERR_CAPACITY);
         let data = PluginData {
@@ -450,13 +472,11 @@ impl Editor {
             plugin: id,
             wasi: WasiCtx::builder().stderr(stderr.clone()).build(),
             table: ResourceTable::new(),
-            limits: StoreLimitsBuilder::new()
-                .memory_size(options.memory_limit)
-                .build(),
+            limits: StoreLimitsBuilder::new().memory_size(limits.memory).build(),
         };
         let mut store = Store::new(&runtime.engine, data);
         store.limiter(|data| &mut data.limits);
-        store.set_epoch_deadline(ticks(options.init_timeout));
+        store.set_epoch_deadline(ticks(limits.init));
         let bindings = bindings::Plugin::instantiate(&mut store, &component, &runtime.linker)
             .map_err(|err| format!("{err:#}"))?;
         plugin.instance = Some(Instance {
@@ -466,7 +486,7 @@ impl Editor {
         });
 
         let config = plugin.config.clone();
-        let timeout = options.init_timeout;
+        let timeout = limits.init;
         let result = self.invoke(id, timeout, |bindings, store| {
             bindings.nib_plugin_guest().call_init(store, &config)
         });
@@ -491,7 +511,7 @@ impl Editor {
     ) -> Option<R> {
         // A stopped plugin has nothing to call and has not failed again.
         self.plugins.entries[id].instance.as_ref()?;
-        let timeout = self.plugins.options.call_timeout;
+        let timeout = self.plugins.entries[id].limits.call;
         match self.invoke(id, timeout, f) {
             Ok(value) => Some(value),
             Err(err) => {

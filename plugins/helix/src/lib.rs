@@ -7,11 +7,13 @@
 
 mod doc;
 mod hints;
+mod keys;
 mod tree;
 
 use std::cell::RefCell;
 
 use doc::{Doc, FindKind};
+use keys::{Binding, Keymap, Keymaps};
 use nib_plugin::exports::nib::plugin::guest::{Guest, KeyResult};
 use nib_plugin::nib::plugin::editor::{ScrollAmount, View};
 use nib_plugin::nib::plugin::events::{self, Event};
@@ -97,6 +99,13 @@ struct Helix {
     expansions: Vec<(Selection, Selection)>,
     /// The key hints shown for a pending key.
     hints: Option<(Pending, Popup)>,
+    /// Keys from `[settings.keys.*]`, looked at before the built-in ones.
+    keymaps: Keymaps,
+    /// Inside a table of `keymaps`: its keys, and the keys typed to get
+    /// there.
+    remap_prefix: Option<(Keymap, Vec<KeyEvent>)>,
+    /// What the table's keys do, while in it.
+    remap_hints: Option<Popup>,
 }
 
 thread_local! {
@@ -113,6 +122,13 @@ thread_local! {
             search: None,
             expansions: Vec::new(),
             hints: None,
+            keymaps: Keymaps {
+                normal: Vec::new(),
+                insert: Vec::new(),
+                select: Vec::new(),
+            },
+            remap_prefix: None,
+            remap_hints: None,
         })
     };
 }
@@ -120,9 +136,20 @@ thread_local! {
 struct Plugin;
 
 impl Guest for Plugin {
-    fn init(_config: String) -> Result<(), String> {
+    fn init(config: String) -> Result<(), String> {
+        let settings: serde_json::Value =
+            serde_json::from_str(&config).map_err(|err| err.to_string())?;
+        let (keymaps, errors) = keys::keymaps(&settings);
+        if let Some(first) = errors.first() {
+            let more = match errors.len() {
+                1 => String::new(),
+                n => format!(" (and {} more)", n - 1),
+            };
+            ui::show_message(&format!("helix.toml: {first}{more}; left out"));
+        }
         input::push_layer();
         HELIX.with_borrow_mut(|helix| {
+            helix.keymaps = keymaps;
             helix.set_mode(Mode::Normal);
             to_blocks(&editor::active_view());
         });
@@ -163,9 +190,9 @@ impl Helix {
             return KeyResult::Handled;
         }
         let view = editor::active_view();
-        let handled = match self.mode {
-            Mode::Normal | Mode::Select => self.normal_key(&view, ev),
-            Mode::Insert => self.insert_key(&view, ev),
+        let handled = match self.remapped(&view, ev) {
+            Some(handled) => handled,
+            None => self.dispatch(&view, ev),
         };
         self.show_hints();
         // The key may have switched buffers.
@@ -175,6 +202,74 @@ impl Helix {
         } else {
             KeyResult::Pass
         }
+    }
+
+    /// The built-in keys of the mode.
+    fn dispatch(&mut self, view: &View, ev: KeyEvent) -> bool {
+        match self.mode {
+            Mode::Normal | Mode::Select => self.normal_key(view, ev),
+            Mode::Insert => self.insert_key(view, ev),
+        }
+    }
+
+    /// Handles `ev` with the keys from the settings, or returns `None` when
+    /// they do not have it.
+    fn remapped(&mut self, view: &View, ev: KeyEvent) -> Option<bool> {
+        if let Some((table, typed)) = self.remap_prefix.take() {
+            self.remap_hints = None;
+            if let Some(binding) = keys::lookup(&table, &ev).cloned() {
+                let mut typed = typed;
+                typed.push(ev);
+                return Some(self.run_binding(view, binding, typed));
+            }
+            // In insert mode, the keys typed were meant as text after all.
+            if self.mode == Mode::Insert {
+                for key in typed {
+                    self.dispatch(view, key);
+                }
+            }
+            return Some(self.dispatch(view, ev));
+        }
+        // Inside a built-in sequence such as `g`, keys keep their meaning.
+        if self.pending.is_some() {
+            return None;
+        }
+        let keymap = match self.mode {
+            Mode::Normal => &self.keymaps.normal,
+            Mode::Insert => &self.keymaps.insert,
+            Mode::Select => &self.keymaps.select,
+        };
+        let binding = keys::lookup(keymap, &ev)?.clone();
+        Some(self.run_binding(view, binding, vec![ev]))
+    }
+
+    fn run_binding(&mut self, view: &View, binding: Binding, typed: Vec<KeyEvent>) -> bool {
+        match binding {
+            Binding::Command(name) => call_or_show(&name),
+            Binding::Keys(keys) => {
+                for key in keys {
+                    self.dispatch(view, key);
+                }
+            }
+            Binding::Prefix(table) => {
+                let title: Vec<String> = typed.iter().map(keys::label).collect();
+                let mut lines = vec![vec![span(&title.join(" "), "ui.popup.title")]];
+                let width = table
+                    .iter()
+                    .map(|(k, _)| keys::label(k).len())
+                    .max()
+                    .unwrap_or(0);
+                for (key, binding) in &table {
+                    lines.push(vec![
+                        span(&format!("{:width$}", keys::label(key)), "ui.popup.key"),
+                        span(&format!("  {}", keys::describe(binding)), ""),
+                    ]);
+                }
+                self.remap_hints = Some(Popup::new(PopupAnchor::Corner, &lines));
+                self.remap_prefix = Some((table, typed));
+            }
+        }
+        true
     }
 
     fn set_mode(&mut self, mode: Mode) {

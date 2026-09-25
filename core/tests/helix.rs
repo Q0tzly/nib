@@ -439,3 +439,72 @@ fn shows_key_hints_while_a_key_is_pending() {
     type_keys(&mut editor, "f");
     assert_eq!(screen(&editor), before);
 }
+
+/// An editor on `text` whose helix plugin has `settings` from helix.toml.
+fn editor_with_settings(text: &str, settings: &str) -> Editor {
+    let mut config = nib_core::Config::default();
+    config.plugins.insert(
+        "helix".into(),
+        nib_core::Config::parse_plugin("helix", settings).unwrap(),
+    );
+    let mut editor = Editor::default();
+    editor.apply_config(config);
+    editor.load_plugin(&plugin_dir("helix")).unwrap();
+    type_keys(&mut editor, &format!("i{text}<esc>gg"));
+    editor.resize(40, 12);
+    editor
+}
+
+#[test]
+fn keys_can_be_remapped() {
+    let settings = r#"
+        [settings.keys.normal]
+        q = "goto_last_line"
+        "C-t" = "buffer.next"
+        z = { z = "goto_file_start", n = "no_op" }
+
+        [settings.keys.insert]
+        j = { k = "normal_mode" }
+    "#;
+    let mut editor = editor_with_settings("one\ntwo\nthree", settings);
+    // A Helix command name replays its keys.
+    type_keys(&mut editor, "q");
+    assert_eq!(primary(&editor).0, 8);
+    // A table is a prefix, with hints.
+    type_keys(&mut editor, "z");
+    assert!(screen(&editor).iter().any(|row| row.contains("as g g")));
+    type_keys(&mut editor, "z");
+    assert_eq!(primary(&editor).0, 0);
+    // A dotted name calls the command.
+    editor.handle_key(KeyEvent::ctrl('t'));
+    assert_eq!(editor.message(), None);
+
+    // jk leaves insert mode; j and another key are text.
+    type_keys(&mut editor, "ijk");
+    assert!(status_line(&editor).starts_with(" NOR "));
+    assert_eq!(text(&editor), "one\ntwo\nthree");
+    type_keys(&mut editor, "ijx<esc>");
+    assert_eq!(text(&editor), "jxone\ntwo\nthree");
+}
+
+#[test]
+fn wrong_mappings_are_reported_and_left_out() {
+    let settings = "[settings.keys.normal]\nq = \"no_such_command\"\nw = \"move_char_right\"";
+    let mut editor = editor_with_settings("abc", settings);
+    // The rest of the keymap still works, the good mapping too.
+    type_keys(&mut editor, "w");
+    assert_eq!(primary(&editor), (1, 2));
+    let mut editor = Editor::default();
+    let mut config = nib_core::Config::default();
+    config.plugins.insert(
+        "helix".into(),
+        nib_core::Config::parse_plugin("helix", settings).unwrap(),
+    );
+    editor.apply_config(config);
+    editor.load_plugin(&plugin_dir("helix")).unwrap();
+    let message = editor.message().unwrap();
+    assert!(
+        message.contains("keys.normal.q: unknown command \"no_such_command\""),
+        "{message}"
+    );
+}

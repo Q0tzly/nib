@@ -4,13 +4,23 @@ nib is at an early, experimental stage. Design discussion in issues is more usef
 
 ## Development
 
+Plugins are built for `wasm32-wasip2`, so install that target for the toolchain you use:
+
 ```sh
+rustup target add wasm32-wasip2
+```
+
+Build the plugins before building or testing the editor. `nib` embeds the standard plugins, and the core's tests run them:
+
+```sh
+cargo xtask build-plugins
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo run --release -p nib-tui -- FILE
 ```
 
-CI runs the same checks.
+The plugins live in their own workspace, so check them with `--manifest-path plugins/Cargo.toml` (and `--target wasm32-wasip2` for clippy). CI runs the same checks.
 
 ## Licensing of contributions
 

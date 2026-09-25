@@ -26,6 +26,7 @@ fn build_plugins() -> Result<(), String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("xtask lives in the repository root");
+    check_wasm_target()?;
     let target = root.join("target");
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let status = Command::new(cargo)
@@ -66,6 +67,29 @@ fn build_plugins() -> Result<(), String> {
         println!("built {name} -> {}", out.display());
     }
     Ok(())
+}
+
+/// Fails early with a fix, instead of a missing `core` crate deep in the
+/// build, when the active toolchain lacks the wasm target. Tool managers
+/// such as mise can select a different toolchain than the default one.
+fn check_wasm_target() -> Result<(), String> {
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
+    let run = |arg: &str| -> Result<String, String> {
+        let output = Command::new(&rustc)
+            .args(["--print", arg])
+            .output()
+            .map_err(|err| format!("failed to run {rustc}: {err}"))?;
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+    let sysroot = PathBuf::from(run("sysroot")?);
+    if sysroot.join("lib/rustlib/wasm32-wasip2").is_dir() {
+        return Ok(());
+    }
+    Err(format!(
+        "the wasm32-wasip2 target is not installed for the toolchain at {}\n\
+         install it with: rustup target add wasm32-wasip2",
+        sysroot.display()
+    ))
 }
 
 /// Directories under `dir` that contain a `plugin.toml`.

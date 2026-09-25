@@ -6,6 +6,7 @@
 //! about modes; they live here.
 
 mod doc;
+mod hints;
 mod tree;
 
 use std::cell::RefCell;
@@ -16,7 +17,7 @@ use nib_plugin::nib::plugin::editor::{ScrollAmount, View};
 use nib_plugin::nib::plugin::types::{
     CursorShape, Edit, KeyCode, KeyEvent, Modifiers, SelRange, Selection, Span, UndoMode,
 };
-use nib_plugin::nib::plugin::ui::{Panel, Side};
+use nib_plugin::nib::plugin::ui::{Decoration, Panel, Popup, PopupAnchor, Side};
 use nib_plugin::nib::plugin::{commands, editor, input, settings, ui};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -91,6 +92,8 @@ struct Helix {
     search: Option<String>,
     /// Selections before and after each `Alt-o`, so `Alt-i` can go back.
     expansions: Vec<(Selection, Selection)>,
+    /// The key hints shown for a pending key.
+    hints: Option<(Pending, Popup)>,
 }
 
 thread_local! {
@@ -106,6 +109,7 @@ thread_local! {
             register: Vec::new(),
             search: None,
             expansions: Vec::new(),
+            hints: None,
         })
     };
 }
@@ -154,6 +158,9 @@ impl Helix {
             Mode::Normal | Mode::Select => self.normal_key(&view, ev),
             Mode::Insert => self.insert_key(&view, ev),
         };
+        self.show_hints();
+        // The key may have switched buffers.
+        highlight_match(&editor::active_view());
         if handled {
             KeyResult::Handled
         } else {
@@ -356,6 +363,20 @@ impl Helix {
             _ => return false,
         }
         true
+    }
+
+    /// Shows what the next key can do while one is pending, and hides it
+    /// afterwards.
+    fn show_hints(&mut self) {
+        match (self.pending, &self.hints) {
+            (Some(pending), Some((shown, _))) if pending == *shown => {}
+            (Some(pending), _) => {
+                self.hints = hints::lines(pending)
+                    .map(|lines| (pending, Popup::new(PopupAnchor::Corner, &lines)));
+            }
+            // Dropping the popup closes it.
+            (None, _) => self.hints = None,
+        }
     }
 
     /// Waits for the next key, keeping the count for it.
@@ -1292,6 +1313,24 @@ fn select_matches(view: &View, pattern: &str) {
 
 /// `mi` and `ma`: selects inside or around the pair of `c` around each
 /// cursor.
+/// Highlights the bracket that pairs with the one at the primary cursor.
+/// Only the syntax tree is asked: searching the text for a bracket without
+/// a pair would scan to the end of the file on every key.
+fn highlight_match(view: &View) {
+    let doc = Doc::new(view.buffer());
+    let selection = view.selection();
+    let pos = cursor(&doc, &selection.ranges[selection.primary as usize]);
+    let decorations: Vec<Decoration> = tree::matching_pair(&doc.buffer, pos)
+        .map(|other| Decoration {
+            start: other,
+            end: other + 1,
+            style: "ui.cursor.match".into(),
+        })
+        .into_iter()
+        .collect();
+    ui::set_decorations(&doc.buffer, "match", &decorations);
+}
+
 /// `mi` and `ma`: selects a text object, or the inside or all of a pair.
 fn select_pairs(view: &View, c: char, around: bool) {
     let doc = Doc::new(view.buffer());

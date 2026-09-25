@@ -139,7 +139,8 @@ interface commands {
 }
 
 interface ui {
-    use types.{styled-line};
+    use types.{offset, styled-line};
+    use editor.{buffer};
 
     enum side { left, right }
 
@@ -161,6 +162,32 @@ interface ui {
         /// the cursor is drawn there instead of in the buffer.
         set-cursor: func(cursor: option<tuple<u32, u32>>);
     }
+
+    variant popup-anchor {
+        /// Below the line of this offset in the shown buffer, or above it
+        /// when there is no room. Hidden while the offset is off screen.
+        /// The offset does not follow edits: open a new popup to move it.
+        position(offset),
+        /// The bottom-right corner of the text, e.g. for key hints.
+        corner,
+    }
+
+    /// Lines drawn over the text. They never take the cursor. Dropping the
+    /// popup closes it.
+    resource popup {
+        constructor(anchor: popup-anchor, lines: list<styled-line>);
+        update: func(lines: list<styled-line>);
+    }
+
+    /// A style over `start..end` of a buffer, drawn over the syntax
+    /// highlighting and under the selection. It only sets what the style
+    /// sets, e.g. the text color.
+    record decoration { start: offset, end: offset, style: string }
+
+    /// Replaces this plugin's decorations in `namespace` on `buf`; an empty
+    /// list removes them. The core moves them with later edits, and drops
+    /// ones whose text is deleted. Ranges are cut to the buffer.
+    set-decorations: func(buf: borrow<buffer>, namespace: string, decorations: list<decoration>);
 }
 
 interface settings {

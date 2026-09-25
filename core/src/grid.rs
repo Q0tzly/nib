@@ -22,6 +22,22 @@ pub struct Style {
     pub reverse: bool,
 }
 
+impl Style {
+    /// `over` on top of `self`: its colors where it has them, and its
+    /// attributes added.
+    pub fn patch(self, over: Style) -> Style {
+        let pick = |base: Color, top: Color| if top == Color::Reset { base } else { top };
+        Style {
+            fg: pick(self.fg, over.fg),
+            bg: pick(self.bg, over.bg),
+            bold: self.bold || over.bold,
+            italic: self.italic || over.italic,
+            underline: self.underline || over.underline,
+            reverse: self.reverse || over.reverse,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Symbol {
     Char(char),

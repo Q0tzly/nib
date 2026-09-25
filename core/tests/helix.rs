@@ -414,3 +414,28 @@ fn switches_buffers() {
     fs::remove_file(&a).unwrap();
     fs::remove_file(&b).unwrap();
 }
+
+#[test]
+fn shows_key_hints_while_a_key_is_pending() {
+    let mut editor = editor_with_text("a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n");
+    editor.resize(40, 12);
+    let shows = |editor: &Editor, text: &str| screen(editor).iter().any(|row| row.contains(text));
+    type_keys(&mut editor, "g");
+    assert!(shows(&editor, "Goto"));
+    assert!(shows(&editor, "e  last line"));
+    type_keys(&mut editor, "e");
+    assert!(!shows(&editor, "Goto"));
+
+    type_keys(&mut editor, "m");
+    assert!(shows(&editor, "Match"));
+    type_keys(&mut editor, "a");
+    assert!(shows(&editor, "Select around"));
+    assert!(!shows(&editor, "Match"));
+    type_keys(&mut editor, "<esc>");
+    assert!(!shows(&editor, "Select around"));
+
+    // Keys that wait for any char show nothing.
+    let before = screen(&editor);
+    type_keys(&mut editor, "f");
+    assert_eq!(screen(&editor), before);
+}

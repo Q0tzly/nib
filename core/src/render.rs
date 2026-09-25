@@ -4,7 +4,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::editor::{Editor, Menu};
 use crate::grid::{Cursor, CursorShape, Grid, Style, display_width};
-use crate::ui::{Panel, Side, Span, StyledLine, Theme};
+use crate::layout;
+use crate::ui::{Panel, PopupAnchor, Side, Span, StyledLine, Theme};
 
 impl Editor {
     /// Draws the editor into `grid`, resizing it to the editor size.
@@ -18,6 +19,7 @@ impl Editor {
         let text_rows = self.text_rows();
         let status_row = (height > 1).then(|| height - 1);
         let mut cursor = self.render_text(grid, text_rows);
+        self.render_popups(grid, text_rows);
         let panel_end = status_row.unwrap_or(height);
         if let Some(panel_cursor) = self.render_panels(grid, text_rows, panel_end) {
             cursor = Some(panel_cursor);
@@ -136,16 +138,18 @@ impl Editor {
             .line_start(view.top_line + rows as usize)
             .unwrap_or(text.len_bytes());
         let syntax = self.state().syntax_styles(visible_start..visible_end);
+        let decorations = self.decoration_styles(visible_start..visible_end);
         let style_at = |offset: usize| {
-            let style = syntax
-                .as_ref()
-                .and_then(|styles| {
-                    styles
-                        .get(offset.checked_sub(visible_start)?)
-                        .copied()
-                        .flatten()
-                })
-                .unwrap_or(normal);
+            let at = |styles: &[Option<Style>]| {
+                styles
+                    .get(offset.checked_sub(visible_start)?)
+                    .copied()
+                    .flatten()
+            };
+            let mut style = syntax.as_deref().and_then(at).unwrap_or(normal);
+            if let Some(decoration) = at(&decorations) {
+                style = style.patch(decoration);
+            }
             if selected(offset) {
                 Style {
                     bg: selection_bg,
@@ -215,6 +219,92 @@ impl Editor {
             y,
             shape: view.cursor_shape,
         })
+    }
+
+    /// The decoration style of each byte in `range` of the shown buffer.
+    fn decoration_styles(&self, range: std::ops::Range<usize>) -> Vec<Option<Style>> {
+        let theme = &self.state().theme;
+        let mut styles: Vec<Option<Style>> = vec![None; range.len()];
+        let decorations = &self.buffer().decorations;
+        let first = decorations.partition_point(|d| d.range.start < range.start);
+        // Decorations starting before the range may still reach into it;
+        // they are few, so scan them all.
+        let reaching = decorations[..first]
+            .iter()
+            .filter(|d| d.range.end > range.start);
+        let starting = decorations[first..]
+            .iter()
+            .take_while(|d| d.range.start < range.end);
+        for decoration in reaching.chain(starting) {
+            let Some(style) = theme.style(&decoration.style) else {
+                continue;
+            };
+            let start = decoration.range.start.max(range.start) - range.start;
+            let end = decoration.range.end.min(range.end) - range.start;
+            for slot in &mut styles[start..end] {
+                *slot = Some(slot.map_or(style, |below| below.patch(style)));
+            }
+        }
+        styles
+    }
+
+    /// Draws popups over the top `rows` rows, oldest first.
+    fn render_popups(&self, grid: &mut Grid, rows: u16) {
+        let state = self.state();
+        let width = grid.width();
+        let base = state.theme.style("ui.popup").unwrap_or_default();
+        for popup in &state.popups {
+            if popup.lines.is_empty() || rows == 0 {
+                continue;
+            }
+            // One blank column on each side.
+            let content = popup.lines.iter().map(|l| line_width(l)).max().unwrap_or(0);
+            let w = content.saturating_add(2).min(width);
+            let h = popup.lines.len().min(rows as usize) as u16;
+            let (x, y) = match popup.anchor {
+                PopupAnchor::Corner => (width - w, rows - h),
+                PopupAnchor::Position { buffer, offset } => {
+                    if buffer != state.view.buffer {
+                        continue;
+                    }
+                    let Some((column, row)) = self.screen_position(offset, rows, width) else {
+                        continue;
+                    };
+                    let y = if row + 1 + h <= rows || row < h {
+                        row + 1
+                    } else {
+                        row - h
+                    };
+                    (column.min(width - w), y)
+                }
+            };
+            for (i, line) in popup.lines.iter().enumerate() {
+                let y = y + i as u16;
+                if y >= rows {
+                    break;
+                }
+                let mut fill = x;
+                while fill < x + w {
+                    fill = grid.put_grapheme(fill, y, " ", base);
+                }
+                if w > 2 {
+                    put_line(grid, &state.theme, x + 1, y, line, base);
+                }
+            }
+        }
+    }
+
+    /// Where `offset` of the shown buffer is drawn in the top `rows` rows,
+    /// if it is on screen.
+    fn screen_position(&self, offset: usize, rows: u16, width: u16) -> Option<(u16, u16)> {
+        let text = self.buffer().text();
+        let view = self.view();
+        // On a char boundary, in case the text changed under the offset.
+        let offset = text.char_to_byte(text.byte_to_char(offset.min(text.len_bytes())));
+        let row = text.byte_to_line(offset).checked_sub(view.top_line)?;
+        let column = layout::column_of(text, offset, self.settings().tab_width)
+            .checked_sub(view.left_col)?;
+        (row < rows as usize && column < u32::from(width)).then_some((column as u16, row as u16))
     }
 
     fn render_status(&self, grid: &mut Grid, y: u16) {
@@ -343,14 +433,23 @@ fn plain(text: &str) -> Span {
     }
 }
 
-/// Puts spans from `x`, styled by the theme, or `base` for names it does not
-/// know. Returns the column after the last grapheme put.
+/// Puts spans from `x`, each styled by the theme over `base`. Returns the
+/// column after the last grapheme put.
 fn put_line(grid: &mut Grid, theme: &Theme, mut x: u16, y: u16, line: &[Span], base: Style) -> u16 {
     for span in line {
-        let style = theme.style(&span.style).unwrap_or(base);
+        let style = theme
+            .style(&span.style)
+            .map_or(base, |style| base.patch(style));
         x = grid.put_str(x, y, &span.text, style);
     }
     x
+}
+
+fn line_width(line: &[Span]) -> u16 {
+    line.iter()
+        .flat_map(|span| span.text.graphemes(true))
+        .map(display_width)
+        .fold(0u16, u16::saturating_add)
 }
 
 #[cfg(test)]
@@ -554,5 +653,74 @@ mod tests {
         assert_eq!(render(&editor).1, None);
         editor.resize(2, 1);
         assert_eq!(render(&editor).0, vec!["ab".to_string()]);
+    }
+
+    #[test]
+    fn decorations_go_over_syntax_and_under_the_selection() {
+        let mut editor = Editor::with_text("abc");
+        editor.resize(6, 2);
+        let state = editor.state_mut();
+        let buffer = state.view.buffer;
+        state.buffers[buffer].set_decorations(1, "x", [(0..2, "ui.cursor.match".into())]);
+        let text = editor.buffer().text().clone();
+        editor.view_mut().selection =
+            Selection::new(vec![crate::Range::new(0, 1)], 0, &text).unwrap();
+        let mut grid = Grid::default();
+        editor.render(&mut grid);
+        let matched = Theme::default().style("ui.cursor.match").unwrap();
+        assert_eq!(
+            grid.cell(0, 0).style,
+            Theme::default()
+                .style("ui.selection")
+                .unwrap()
+                .patch(matched)
+        );
+        assert_eq!(grid.cell(1, 0).style, matched);
+        assert_eq!(grid.cell(2, 0).style, Style::default());
+    }
+
+    fn popup(anchor: PopupAnchor, lines: &[&str]) -> crate::ui::Popup {
+        crate::ui::Popup {
+            id: 1,
+            owner: 0,
+            anchor,
+            lines: lines.iter().map(|l| vec![span(l, "")]).collect(),
+        }
+    }
+
+    #[test]
+    fn popups_sit_at_their_anchor() {
+        let mut editor = Editor::with_text("a\nbcd\nc\nd\ne");
+        editor.resize(12, 6);
+        let at = |offset| PopupAnchor::Position { buffer: 0, offset };
+        // Below the line of the offset, from its column.
+        editor.state_mut().popups = vec![popup(at(3), &["hi"])];
+        let (rows, cursor) = render(&editor);
+        assert_eq!(rows[2], "c hi        ");
+        assert_eq!(
+            cursor.map(|c| (c.x, c.y)),
+            Some((0, 0)),
+            "popups do not take the cursor"
+        );
+        // Above it when there is no room below.
+        editor.state_mut().popups = vec![popup(at(10), &["one", "two"])];
+        let (rows, _) = render(&editor);
+        assert_eq!(
+            &rows[2..5],
+            [" one        ", " two        ", "e           "]
+        );
+        // Moved left to fit, and in the corner.
+        editor.state_mut().popups = vec![
+            popup(at(2), &["wide popup"]),
+            popup(PopupAnchor::Corner, &["k"]),
+        ];
+        let (rows, _) = render(&editor);
+        assert_eq!(rows[2], " wide popup ");
+        assert_eq!(rows[4], "e         k ");
+        // Hidden while the offset is off screen.
+        editor.state_mut().popups = vec![popup(at(9), &["x"])];
+        editor.view_mut().top_line = 4;
+        let (rows, _) = render(&editor);
+        assert!(!rows.concat().contains('x'));
     }
 }

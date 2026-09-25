@@ -15,7 +15,7 @@ use crate::input::{KeyCode, KeyEvent};
 use crate::layout;
 use crate::selection::{Range, Selection};
 use crate::syntax::{self as trees, NodeInfo};
-use crate::ui::{Panel, Side, Span, StatusItem, StyledLine};
+use crate::ui::{Panel, Popup, PopupAnchor, Side, Span, StatusItem, StyledLine};
 use crate::{Edit, Error};
 
 pub(crate) mod bindings {
@@ -29,6 +29,7 @@ pub(crate) mod bindings {
             "nib:plugin/editor.buffer": super::BufferHandle,
             "nib:plugin/editor.view": super::ViewHandle,
             "nib:plugin/ui.panel": super::PanelHandle,
+            "nib:plugin/ui.popup": super::PopupHandle,
         },
     });
 }
@@ -45,6 +46,9 @@ pub struct ViewHandle;
 
 /// A panel as seen by a plugin. The resource's rep is the panel id.
 pub struct PanelHandle;
+
+/// A popup as seen by a plugin. The resource's rep is the popup id.
+pub struct PopupHandle;
 
 type HostResult<T> = wasmtime::Result<T>;
 
@@ -507,6 +511,75 @@ impl wit_ui::Host for PluginData {
 
     fn show_message(&mut self, text: String) -> HostResult<()> {
         self.state()?.message = Some(text);
+        Ok(())
+    }
+
+    fn set_decorations(
+        &mut self,
+        buffer: Resource<BufferHandle>,
+        namespace: String,
+        decorations: Vec<wit_ui::Decoration>,
+    ) -> HostResult<()> {
+        let owner = self.plugin;
+        let offset = |o: u64| usize::try_from(o).unwrap_or(usize::MAX);
+        self.buffer(&buffer)?.set_decorations(
+            owner,
+            &namespace,
+            decorations
+                .into_iter()
+                .map(|d| (offset(d.start)..offset(d.end), d.style)),
+        );
+        Ok(())
+    }
+}
+
+impl wit_ui::HostPopup for PluginData {
+    fn new(
+        &mut self,
+        anchor: wit_ui::PopupAnchor,
+        lines: Vec<Vec<wit::Span>>,
+    ) -> HostResult<Resource<PopupHandle>> {
+        let owner = self.plugin;
+        let state = self.state()?;
+        let anchor = match anchor {
+            wit_ui::PopupAnchor::Position(offset) => PopupAnchor::Position {
+                buffer: state.view.buffer,
+                offset: usize::try_from(offset).unwrap_or(usize::MAX),
+            },
+            wit_ui::PopupAnchor::Corner => PopupAnchor::Corner,
+        };
+        state.last_popup_id += 1;
+        let id = state.last_popup_id;
+        state.popups.push(Popup {
+            id,
+            owner,
+            anchor,
+            lines: lines.into_iter().map(styled_line).collect(),
+        });
+        Ok(Resource::new_own(id))
+    }
+
+    fn update(
+        &mut self,
+        popup: Resource<PopupHandle>,
+        lines: Vec<Vec<wit::Span>>,
+    ) -> HostResult<()> {
+        let popup = self
+            .state()?
+            .popups
+            .iter_mut()
+            .find(|p| p.id == popup.rep())
+            .ok_or_else(|| wasmtime::Error::msg("the popup is closed"))?;
+        popup.lines = lines.into_iter().map(styled_line).collect();
+        Ok(())
+    }
+
+    fn drop(&mut self, popup: Resource<PopupHandle>) -> HostResult<()> {
+        // Outside a call, the plugin is being stopped and its popups are
+        // removed anyway.
+        if let Some(state) = self.state.as_mut() {
+            state.popups.retain(|p| p.id != popup.rep());
+        }
         Ok(())
     }
 }

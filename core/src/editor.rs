@@ -11,7 +11,7 @@ use crate::input::{KeyCode, KeyEvent};
 use crate::layout;
 use crate::plugin::{PluginId, Plugins};
 use crate::syntax::{BufferSyntax, Languages};
-use crate::ui::{Panel, StatusItem, Theme};
+use crate::ui::{Panel, Popup, StatusItem, Theme};
 use crate::view::View;
 
 /// Everything plugins can see and change. While a plugin runs, it is lent to
@@ -33,6 +33,9 @@ pub(crate) struct State {
     /// Bottom panels, in the order they were opened.
     pub panels: Vec<Panel>,
     pub last_panel_id: u32,
+    /// Popups, drawn in the order they were opened.
+    pub popups: Vec<Popup>,
+    pub last_popup_id: u32,
     /// Views of buffers not shown, so switching back restores the selection
     /// and scroll position.
     pub hidden_views: HashMap<usize, View>,
@@ -254,6 +257,10 @@ impl State {
         self.layers.retain(|&layer| layer != plugin);
         self.status.retain(|item| item.owner != plugin);
         self.panels.retain(|panel| panel.owner != plugin);
+        self.popups.retain(|popup| popup.owner != plugin);
+        for buffer in &mut self.buffers {
+            buffer.remove_decorations(plugin);
+        }
     }
 }
 
@@ -304,6 +311,8 @@ impl Default for Editor {
                 status: Vec::new(),
                 panels: Vec::new(),
                 last_panel_id: 0,
+                popups: Vec::new(),
+                last_popup_id: 0,
                 hidden_views: HashMap::new(),
                 languages: Languages::default(),
                 theme: Theme::default(),

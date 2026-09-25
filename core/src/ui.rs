@@ -1,7 +1,9 @@
-//! UI parts that plugins put on screen: status line items and panels. The
-//! core lays them out; plugins never see screen coordinates.
+//! UI parts that plugins put on screen: status line items, panels, popups,
+//! and decorations. The core lays them out; plugins never see screen
+//! coordinates.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 use crate::grid::{Color, Style};
 use crate::plugin::PluginId;
@@ -37,6 +39,31 @@ pub(crate) struct Panel {
     pub lines: Vec<StyledLine>,
     /// A line index and a byte offset into that line's text.
     pub cursor: Option<(u32, u32)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PopupAnchor {
+    /// Below or above the line of `offset` in buffer `buffer`.
+    Position { buffer: usize, offset: usize },
+    /// The bottom-right corner of the text.
+    Corner,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Popup {
+    pub id: u32,
+    pub owner: PluginId,
+    pub anchor: PopupAnchor,
+    pub lines: Vec<StyledLine>,
+}
+
+/// A style a plugin put over part of a buffer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Decoration {
+    pub owner: PluginId,
+    pub namespace: String,
+    pub range: Range<usize>,
+    pub style: String,
 }
 
 fn fg(color: u8) -> Style {
@@ -91,6 +118,20 @@ fn builtin(name: &str) -> Option<Style> {
         }),
         "ui.menu.selected" => Some(Style {
             reverse: true,
+            ..Style::default()
+        }),
+        "ui.popup" => Some(Style {
+            bg: Color::Indexed(8),
+            ..Style::default()
+        }),
+        "ui.popup.title" => Some(Style {
+            bold: true,
+            ..Style::default()
+        }),
+        "ui.popup.key" => Some(fg(3)),
+        "ui.cursor.match" => Some(Style {
+            bold: true,
+            underline: true,
             ..Style::default()
         }),
         // Syntax, by tree-sitter capture name. The base colors follow the

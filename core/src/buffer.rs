@@ -5,12 +5,15 @@ use std::path::{Path, PathBuf};
 use ropey::Rope;
 
 use crate::Error;
+use crate::change::Assoc;
 use crate::change::{ChangeSet, Edit};
 use crate::grapheme;
 use crate::history::{History, UndoMode};
+use crate::plugin::PluginId;
 use crate::search;
 use crate::selection::{Range, Selection};
 use crate::syntax::BufferSyntax;
+use crate::ui::Decoration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LineEnding {
@@ -37,6 +40,8 @@ pub struct Buffer {
     history: History,
     saved_state: u64,
     pub(crate) syntax: Option<BufferSyntax>,
+    /// Sorted by start, so drawing can skip to the visible ones.
+    pub(crate) decorations: Vec<Decoration>,
 }
 
 impl Default for Buffer {
@@ -65,6 +70,7 @@ impl Buffer {
             history: History::default(),
             saved_state: 0,
             syntax: None,
+            decorations: Vec::new(),
         }
     }
 
@@ -250,6 +256,7 @@ impl Buffer {
         }
         self.text = text;
         self.version += 1;
+        self.map_decorations(std::slice::from_ref(&changes));
         self.history.record(
             changes.clone(),
             inverse,
@@ -266,6 +273,7 @@ impl Buffer {
     pub fn undo(&mut self) -> Option<Change> {
         let (changes, selection) = self.history.undo(&mut self.text)?;
         self.version += 1;
+        self.map_decorations(&changes);
         if let Some(syntax) = &mut self.syntax {
             syntax.invalidate();
         }
@@ -275,10 +283,62 @@ impl Buffer {
     pub fn redo(&mut self) -> Option<Change> {
         let (changes, selection) = self.history.redo(&mut self.text)?;
         self.version += 1;
+        self.map_decorations(&changes);
         if let Some(syntax) = &mut self.syntax {
             syntax.invalidate();
         }
         Some(Change { changes, selection })
+    }
+}
+
+impl Buffer {
+    /// Replaces the decorations `owner` has in `namespace`. Ranges are cut
+    /// to the text, and empty ones dropped.
+    pub(crate) fn set_decorations(
+        &mut self,
+        owner: PluginId,
+        namespace: &str,
+        decorations: impl IntoIterator<Item = (std::ops::Range<usize>, String)>,
+    ) {
+        self.decorations
+            .retain(|d| !(d.owner == owner && d.namespace == namespace));
+        let len = self.len();
+        self.decorations.extend(
+            decorations
+                .into_iter()
+                .map(|(range, style)| Decoration {
+                    owner,
+                    namespace: namespace.to_string(),
+                    range: range.start.min(len)..range.end.min(len),
+                    style,
+                })
+                .filter(|d| d.range.start < d.range.end),
+        );
+        self.decorations.sort_by_key(|d| d.range.start);
+    }
+
+    pub(crate) fn remove_decorations(&mut self, owner: PluginId) {
+        self.decorations.retain(|d| d.owner != owner);
+    }
+
+    /// Moves decorations with the text. Text inserted at either end stays
+    /// outside, and decorations whose text is gone are dropped.
+    fn map_decorations(&mut self, changes: &[ChangeSet]) {
+        if self.decorations.is_empty() {
+            return;
+        }
+        for decoration in &mut self.decorations {
+            for change in changes {
+                let range = &mut decoration.range;
+                *range = change.map_pos(range.start, Assoc::After)
+                    ..change.map_pos(range.end, Assoc::Before);
+                if range.end <= range.start {
+                    break;
+                }
+            }
+        }
+        self.decorations.retain(|d| d.range.start < d.range.end);
+        self.decorations.sort_by_key(|d| d.range.start);
     }
 }
 
@@ -496,5 +556,52 @@ mod tests {
         assert_eq!(change.selection.primary(), Range::new(0, 2));
         assert_eq!(buffer.version(), 0);
         assert!(buffer.undo().is_none());
+    }
+
+    fn decorated(buffer: &Buffer) -> Vec<(usize, usize)> {
+        buffer
+            .decorations
+            .iter()
+            .map(|d| (d.range.start, d.range.end))
+            .collect()
+    }
+
+    #[test]
+    fn decorations_follow_edits() {
+        let mut buffer = Buffer::with_text("one two three");
+        buffer.set_decorations(1, "words", [(4..7, "a".into()), (8..13, "b".into())]);
+        // Text inserted at either end stays outside.
+        insert(&mut buffer, 4, "xx", UndoMode::NewStep);
+        insert(&mut buffer, 9, "yy", UndoMode::NewStep);
+        assert_eq!(decorated(&buffer), [(6, 9), (12, 17)]);
+        assert_eq!(buffer.slice(6, 9).unwrap(), "two");
+        buffer.undo();
+        buffer.undo();
+        assert_eq!(decorated(&buffer), [(4, 7), (8, 13)]);
+
+        // Deleting the text drops the decoration.
+        let sel = Selection::point(0);
+        let edits = vec![Edit::delete(3, 8)];
+        buffer
+            .apply(buffer.version(), edits, &sel, None, UndoMode::NewStep)
+            .unwrap();
+        assert_eq!(decorated(&buffer), [(3, 8)]);
+        assert_eq!(buffer.slice(3, 8).unwrap(), "three");
+    }
+
+    #[test]
+    fn decorations_are_replaced_per_owner_and_namespace() {
+        let mut buffer = Buffer::with_text("abcdef");
+        buffer.set_decorations(1, "x", [(0..1, "a".into())]);
+        buffer.set_decorations(1, "y", [(1..2, "a".into())]);
+        buffer.set_decorations(2, "x", [(2..3, "a".into())]);
+        buffer.set_decorations(
+            1,
+            "x",
+            [(3..4, "a".into()), (5..99, "a".into()), (4..4, "a".into())],
+        );
+        assert_eq!(decorated(&buffer), [(1, 2), (2, 3), (3, 4), (5, 6)]);
+        buffer.remove_decorations(1);
+        assert_eq!(decorated(&buffer), [(2, 3)]);
     }
 }

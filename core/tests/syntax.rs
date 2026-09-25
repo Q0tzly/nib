@@ -268,3 +268,21 @@ fn matches_pairs_with_the_tree() {
     assert_eq!(selected(&editor), "\"}\"");
     fs::remove_file(&path).unwrap();
 }
+
+#[test]
+fn highlights_the_matching_bracket() {
+    let (mut editor, path) = rust_editor("highlight");
+    let underlined = |editor: &Editor, x, y| {
+        let mut grid = Grid::default();
+        editor.render(&mut grid);
+        grid.cell(x, y).style.underline
+    };
+    put_cursor(&mut editor, "{\n    let");
+    // Updated after each key the keymap handles.
+    type_keys(&mut editor, ";");
+    assert!(underlined(&editor, 0, 5), "the closing brace");
+    assert!(!underlined(&editor, 13, 3), "the brace in the string");
+    type_keys(&mut editor, "j");
+    assert!(!underlined(&editor, 0, 5));
+    fs::remove_file(&path).unwrap();
+}

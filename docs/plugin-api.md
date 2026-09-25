@@ -256,11 +256,35 @@ JSON を選んだのは、WIT に再帰する型がなく、任意の値の木�
 | `ui.show-message(text)` | 次のキーまでメッセージを出す |
 | `ui.panel(lines)` | 画面下端（ステータスラインの上）のパネル。リソースで、`update` で中身を差し替え、捨てると閉じる |
 | `panel.set-cursor(option<(line, byte)>)` | パネル内のカーソル。設定している間は、バッファのカーソルの代わりにここへカーソルを出す。コマンドラインの入力位置に使う |
-| `ui.open-popup(anchor, lines)` | バッファ上の位置に結びつけたポップアップ（M2） |
+| `ui.popup(anchor, lines)` | 本文の上に重ねるポップアップ。パネルと同じくリソースで、`update` で中身を差し替え、捨てると閉じる |
+| `ui.set-decorations(buffer, namespace, decorations)` | バッファの範囲にスタイルを付ける |
 
 中身はすべて `styled-line` で渡し、配置と切り詰めはコアが行う。
 
-装飾（ハイライト、下線、行内の文字列、行頭の記号）は、`ui.set-decorations(buffer, namespace, list<decoration>)` で名前空間ごとにまとめて差し替える。付けたあとの位置の追従はコアが行う。
+```wit
+variant popup-anchor {
+    /// 表示中のバッファのこの位置の行の下（入らなければ上）
+    position(offset),
+    /// 本文の右下の角
+    corner,
+}
+
+resource popup {
+    constructor(anchor: popup-anchor, lines: list<styled-line>);
+    update: func(lines: list<styled-line>);
+}
+
+/// style はテーマの名前（例: "ui.cursor.match"）
+record decoration { start: offset, end: offset, style: string }
+
+/// このプラグインが buf の namespace に付けた装飾を、decorations で置き換える。
+/// 空のリストで消える
+set-decorations: func(buf: borrow<buffer>, namespace: string, decorations: list<decoration>);
+```
+
+- 装飾の位置は、付けたあとの編集に合わせてコアが動かす（[architecture.md](architecture.md) の「装飾」）。プラグインが編集のたびに付け直す必要はない。
+- 装飾の範囲はバッファの長さに切り詰め、空の範囲は捨てる。
+- ポップアップの位置は編集に合わせて動かない。位置を変えたいときは作り直す。
 
 ## 権限
 
@@ -307,9 +331,9 @@ Helix 風キーマップで nib 自身を編集するのに必要なものだけ
 | `editor`（バッファ、選択、`apply`、undo、検索、縦移動、スクロール、カーソルの形） | ○ |
 | `input`（入力スタック） | ○ |
 | `commands`（登録と呼び出し、`buffer.open` / `buffer.save` / `editor.quit`） | ○ |
-| `ui.set-status`、`ui.open-panel` | ○ |
+| `ui.set-status`、`ui.panel` | ○ |
 | `events`（`buffer-changed`、`custom`） | ○ |
-| `ui.open-popup`、装飾 | M1 のあと |
+| `ui.popup`、装飾 | M2.3 |
 | `timers`、`process`、権限の宣言 | M1 のあと（LSP と一緒） |
 | 構文木の API | M2.2 |
 | Go SDK | M1 のあと |

@@ -41,12 +41,14 @@ impl KeyEvent {
         }
     }
 
-    pub fn ctrl(c: char) -> Self {
+    pub const fn ctrl(c: char) -> Self {
         Self {
             code: KeyCode::Char(c),
             modifiers: Modifiers {
                 ctrl: true,
-                ..Modifiers::default()
+                alt: false,
+                shift: false,
+                super_: false,
             },
         }
     }

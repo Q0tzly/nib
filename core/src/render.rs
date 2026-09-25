@@ -6,6 +6,8 @@ use crate::editor::Editor;
 use crate::grid::{Cursor, Grid, Style, display_width};
 
 const TAB_WIDTH: u16 = 4;
+const RESCUE_MENU: &str =
+    "[w] save all and quit  [q] quit without saving  [r] restart plugins  [any other key] back";
 
 impl Editor {
     /// Draws the editor into `grid`, resizing it to the editor size.
@@ -77,6 +79,10 @@ impl Editor {
             ..Style::default()
         };
         grid.fill_row(0, y, style);
+        if self.in_rescue_menu() {
+            grid.put_str(1, y, RESCUE_MENU, style);
+            return;
+        }
 
         let buffer = self.buffer();
         let name = buffer
@@ -95,7 +101,7 @@ impl Editor {
         let before_cursor: Cow<str> = text.byte_slice(text.line_to_byte(line)..cursor).into();
         let column = before_cursor.graphemes(true).count();
         let position = format!("{}:{} ", line + 1, column + 1);
-        let right = match self.emergency_keys_hint() {
+        let right = match self.key_hint() {
             Some(hint) => format!("{hint}  {position}"),
             None => position,
         };
@@ -128,7 +134,7 @@ mod tests {
         assert_eq!(rows[1], format!("{:30}", "    nib();"));
         assert_eq!(rows[2], format!("{:30}", "}"));
         assert_eq!(rows[3], " ".repeat(30));
-        assert_eq!(rows[4], " [scratch]  Ctrl-q: quit  1:1 ");
+        assert_eq!(rows[4], " [scratch]  Ctrl-q: menu  1:1 ");
         assert_eq!(
             cursor,
             Some(Cursor {
@@ -173,6 +179,15 @@ mod tests {
         editor.view_mut().selection = Selection::point(5);
         let (_, cursor) = render(&editor);
         assert_eq!(cursor.map(|c| (c.x, c.y)), Some((7, 0)));
+    }
+
+    #[test]
+    fn rescue_menu_replaces_the_status_line() {
+        let mut editor = Editor::with_text("a");
+        editor.resize(100, 2);
+        editor.handle_key(crate::KeyEvent::ctrl('q'));
+        let (rows, _) = render(&editor);
+        assert!(rows[1].starts_with(" [w] save all and quit"), "{}", rows[1]);
     }
 
     #[test]

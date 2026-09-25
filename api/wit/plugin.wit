@@ -115,7 +115,8 @@ interface guest {
     /// Called once after loading. `config` is the plugin's config table as JSON.
     init: func(config: string) -> result<_, string>;
 
-    /// A key reached one of this plugin's input layers.
+    /// A key reached one of this plugin's input layers. Ctrl-q never
+    /// arrives: the core reserves it for its rescue menu.
     handle-key: func(ev: key-event) -> key-result;
 }
 

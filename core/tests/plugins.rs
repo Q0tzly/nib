@@ -40,13 +40,22 @@ fn plugin_edits_the_buffer() {
     assert_eq!(editor.view().selection.primary(), Range::point(6));
     assert_eq!(editor.message(), None);
 
-    // The plugin takes Ctrl-q too, so the emergency key does not quit.
+    // Ctrl-q opens the rescue menu instead of reaching the plugin, and the
+    // key that closes the menu does not reach it either.
     editor.handle_key(KeyEvent::ctrl('q'));
-    assert!(!editor.should_quit());
-
-    // Escape pops the plugin's layer, and the emergency key works again.
+    assert!(editor.in_rescue_menu());
     editor.handle_key(KeyEvent::new(KeyCode::Escape));
+    assert!(!editor.in_rescue_menu());
+    editor.handle_key(key('!'));
+    assert_eq!(editor.buffer().text().to_string(), "hi あ!");
+
+    // Escape pops the plugin's layer.
+    assert_eq!(editor.key_hint(), None);
+    editor.handle_key(KeyEvent::new(KeyCode::Escape));
+    assert!(editor.key_hint().is_some());
+
     editor.handle_key(KeyEvent::ctrl('q'));
+    editor.handle_key(key('q'));
     assert!(editor.should_quit());
 }
 
@@ -68,9 +77,8 @@ fn failing_plugin_is_restarted_then_disabled() {
     assert!(message.contains("restarted"), "{message}");
     assert!(message.contains("took too long"), "{message}");
 
-    // Restarted: its layer is back, so Ctrl-q still does not quit.
-    editor.handle_key(KeyEvent::ctrl('q'));
-    assert!(!editor.should_quit());
+    // Restarted: its layer is back.
+    assert_eq!(editor.key_hint(), None);
 
     editor.handle_key(key('p'));
     let message = editor.message().unwrap();
@@ -82,9 +90,14 @@ fn failing_plugin_is_restarted_then_disabled() {
     assert!(message.contains("disabled"), "{message}");
     assert!(!editor.plugins()[0].enabled);
 
-    // With the plugin gone, the emergency key works.
+    assert!(editor.key_hint().is_some());
+
+    // The rescue menu brings it back.
     editor.handle_key(KeyEvent::ctrl('q'));
-    assert!(editor.should_quit());
+    editor.handle_key(key('r'));
+    assert_eq!(editor.message(), Some("plugins restarted"));
+    assert!(editor.plugins()[0].enabled);
+    assert_eq!(editor.key_hint(), None);
 }
 
 #[test]
@@ -95,8 +108,8 @@ fn init_error_is_reported() {
         .unwrap_err();
     assert!(err.to_string().contains("asked to fail"), "{err}");
     assert!(editor.plugins().is_empty());
-    editor.handle_key(KeyEvent::ctrl('q'));
-    assert!(editor.should_quit());
+    // Whatever the plugin did in `init` was undone.
+    assert!(editor.key_hint().is_some());
 }
 
 #[test]

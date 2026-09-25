@@ -212,6 +212,29 @@ impl Editor {
             .collect()
     }
 
+    /// Restarts every plugin, including disabled ones, forgetting their past
+    /// failures.
+    pub(crate) fn restart_plugins(&mut self) {
+        let mut failures = Vec::new();
+        for id in 0..self.plugins.entries.len() {
+            self.stop_plugin(id);
+            let plugin = &mut self.plugins.entries[id];
+            plugin.crashes.clear();
+            plugin.enabled = true;
+            if let Err(err) = self.start_plugin(id) {
+                let plugin = &mut self.plugins.entries[id];
+                plugin.enabled = false;
+                failures.push(format!("{}: {err}", plugin.name));
+            }
+        }
+        let message = match (self.plugins.entries.is_empty(), failures.is_empty()) {
+            (true, _) => "no plugins are loaded".to_string(),
+            (false, true) => "plugins restarted".to_string(),
+            (false, false) => format!("restarting failed: {}", failures.join("; ")),
+        };
+        self.state_mut().message = Some(message);
+    }
+
     /// Returns whether the plugin handled the key. A failing plugin counts
     /// as having handled it, so the key does not fall through.
     pub(crate) fn plugin_handle_key(&mut self, id: PluginId, key: KeyEvent) -> bool {

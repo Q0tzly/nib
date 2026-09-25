@@ -44,6 +44,8 @@ enum Pending {
     MatchPair { around: bool },
     /// `]` and `[`, waiting for the object's key.
     Object { forward: bool },
+    /// `Space`, for commands of other plugins, such as the file picker.
+    Space,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -367,6 +369,7 @@ impl Helix {
                 self.search = Some(pattern);
             }
             'm' => self.wait(Pending::Match, count),
+            ' ' => self.wait(Pending::Space, count),
             ']' => self.wait(Pending::Object { forward: true }, count),
             '[' => self.wait(Pending::Object { forward: false }, count),
             _ => return false,
@@ -418,6 +421,15 @@ impl Helix {
             },
             Pending::MatchPair { around } => select_pairs(view, c, around),
             Pending::Object { forward } => goto_object(view, c, forward, count.unwrap_or(1)),
+            Pending::Space => {
+                let command = match c {
+                    'f' => "picker.files",
+                    _ => return,
+                };
+                if let Err(err) = commands::call(command, "") {
+                    ui::show_message(&err);
+                }
+            }
             Pending::Goto => {
                 let goto: fn(&Doc, u64, Option<u64>) -> u64 = match c {
                     'g' => |doc, _, count| doc.line_start(count.map_or(0, |n| n.saturating_sub(1))),

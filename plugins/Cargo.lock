@@ -103,7 +103,14 @@ dependencies = [
 
 [[package]]
 name = "nib-plugin-helix"
-version = "0.1.4"
+version = "0.1.5"
+dependencies = [
+ "nib-plugin",
+]
+
+[[package]]
+name = "nib-plugin-picker"
+version = "0.1.0"
 dependencies = [
  "nib-plugin",
 ]

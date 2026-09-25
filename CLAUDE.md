@@ -24,7 +24,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-プラグインは別ワークスペース（`plugins/Cargo.toml`）なので、fmt と clippy は `--manifest-path plugins/Cargo.toml` を付けて別に回す（clippy は `--target wasm32-wasip2`）。CI も同じ内容（test は Linux / macOS / Windows）。
+プラグインは別ワークスペース（`plugins/Cargo.toml`）なので、fmt、clippy、test は `--manifest-path plugins/Cargo.toml` を付けて別に回す（clippy は `--target wasm32-wasip2`、test はネイティブで動かす）。CI も同じ内容（test は Linux / macOS / Windows）。
 
 `api/wit/` を変えたら `cargo xtask build-plugins` をやり直す。古いプラグインは読み込みで型が合わずに失敗する。
 

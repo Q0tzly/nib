@@ -51,6 +51,7 @@ pub fn lines(pending: Pending) -> Option<Vec<Vec<Span>>> {
             let title = if forward { "Next" } else { "Previous" };
             (title, OBJECTS.to_vec())
         }
+        Pending::Space => ("Space", vec![("f", "open a file")]),
         Pending::Find(_) | Pending::Replace => return None,
     };
     let key_width = entries.iter().map(|(key, _)| key.len()).max().unwrap_or(0);

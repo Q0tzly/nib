@@ -1,0 +1,5 @@
+name = "picker"
+version = "0.1.0"
+api = "0.1"
+# Lists files with git or rg.
+capabilities = ["process"]

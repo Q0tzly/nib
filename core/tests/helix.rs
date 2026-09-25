@@ -508,3 +508,33 @@ fn wrong_mappings_are_reported_and_left_out() {
         "{message}"
     );
 }
+
+#[test]
+fn dot_repeats_the_last_insert() {
+    let mut editor = editor_with_text("a\nb\n");
+    type_keys(&mut editor, "Ax<esc>j.");
+    assert_eq!(text(&editor), "ax\nbx\n");
+    // With a count, and for an insert that opened a line.
+    type_keys(&mut editor, "ohi<esc>2.");
+    assert_eq!(text(&editor), "ax\nbx\nhi\nhi\nhi\n");
+    // Undone one repeat at a time.
+    type_keys(&mut editor, "u");
+    assert_eq!(text(&editor), "ax\nbx\nhi\nhi\n");
+}
+
+#[test]
+fn registers_keep_what_they_are_given() {
+    let mut editor = editor_with_text("one\ntwo\n");
+    type_keys(&mut editor, "x\"ay");
+    // Deleted into `_`, the line is gone for good.
+    type_keys(&mut editor, "jx\"_d");
+    assert_eq!(text(&editor), "one\n");
+    type_keys(&mut editor, "k\"ap");
+    assert_eq!(text(&editor), "one\none\n");
+    // The default register was never given anything.
+    type_keys(&mut editor, "p");
+    assert_eq!(editor.message(), Some("register \" is empty"));
+    // A chosen register lasts for one command.
+    type_keys(&mut editor, "\"ajp");
+    assert_eq!(editor.message(), Some("register \" is empty"));
+}

@@ -56,7 +56,7 @@ pub fn lines(pending: Pending) -> Option<Vec<Vec<Span>>> {
             "Space",
             vec![("f", "open a file"), ("k", "show what it is")],
         ),
-        Pending::Find(_) | Pending::Replace => return None,
+        Pending::Find(_) | Pending::Replace | Pending::Register => return None,
     };
     let key_width = entries.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
     let mut lines = vec![vec![span(title, "ui.popup.title")]];

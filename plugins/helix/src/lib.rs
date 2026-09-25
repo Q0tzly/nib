@@ -11,6 +11,7 @@ mod keys;
 mod tree;
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 use doc::{Doc, FindKind};
 use keys::{Binding, Keymap, Keymaps};
@@ -48,6 +49,8 @@ enum Pending {
     Object { forward: bool },
     /// `Space`, for commands of other plugins, such as the file picker.
     Space,
+    /// `"`, waiting for a register's name.
+    Register,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -91,8 +94,19 @@ struct Helix {
     /// onto the last inserted grapheme, as Helix does.
     appending: bool,
     command_line: Option<CommandLine>,
-    /// What `y`, `d`, and `c` took, one value per selection.
-    register: Vec<String>,
+    /// What `y`, `d`, and `c` took, one value per selection, by register.
+    registers: BTreeMap<char, Vec<String>>,
+    /// The register chosen with `"` for the next command.
+    register: Option<char>,
+    /// The register was chosen by the key just handled, so it stays for
+    /// the next one.
+    register_fresh: bool,
+    /// The keys of the insert in progress, from the key that started it.
+    recording: Option<Vec<KeyEvent>>,
+    /// The keys of the last insert, for `.`.
+    last_insert: Option<Vec<KeyEvent>>,
+    /// Keys are being replayed by `.`, so they are not recorded.
+    replaying: bool,
     /// The last search pattern, for `n` and `N`.
     search: Option<String>,
     /// Selections before and after each `Alt-o`, so `Alt-i` can go back.
@@ -118,7 +132,12 @@ thread_local! {
             inserted: false,
             appending: false,
             command_line: None,
-            register: Vec::new(),
+            registers: BTreeMap::new(),
+            register: None,
+            register_fresh: false,
+            recording: None,
+            last_insert: None,
+            replaying: false,
             search: None,
             expansions: Vec::new(),
             hints: None,
@@ -190,10 +209,17 @@ impl Helix {
             return KeyResult::Handled;
         }
         let view = editor::active_view();
+        let was_inserting = self.mode == Mode::Insert;
         let handled = match self.remapped(&view, ev) {
             Some(handled) => handled,
             None => self.dispatch(&view, ev),
         };
+        self.record(ev, was_inserting);
+        // A chosen register lasts for the next command only.
+        if !self.register_fresh && self.pending.is_none() && self.count.is_none() {
+            self.register = None;
+        }
+        self.register_fresh = false;
         self.show_hints();
         // The key may have switched buffers.
         highlight_match(&editor::active_view());
@@ -202,6 +228,47 @@ impl Helix {
         } else {
             KeyResult::Pass
         }
+    }
+
+    /// Records the keys of an insert, from the key that started it to the
+    /// one that ended it, for `.`.
+    fn record(&mut self, ev: KeyEvent, was_inserting: bool) {
+        if self.replaying {
+            return;
+        }
+        let inserting = self.mode == Mode::Insert;
+        if !was_inserting {
+            if inserting {
+                self.recording = Some(vec![ev]);
+            }
+            return;
+        }
+        if let Some(keys) = &mut self.recording {
+            keys.push(ev);
+        }
+        if !inserting {
+            self.last_insert = self.recording.take();
+        }
+    }
+
+    /// `.`: does the last insert again, `count` times.
+    fn repeat(&mut self, count: u64) {
+        let Some(keys) = self.last_insert.clone() else {
+            ui::show_message("nothing to repeat yet");
+            return;
+        };
+        self.replaying = true;
+        for _ in 0..count {
+            for &key in &keys {
+                self.handle_key(key);
+            }
+        }
+        self.replaying = false;
+    }
+
+    /// The register the next command uses: the chosen one, or `"`.
+    fn take_register(&mut self) -> char {
+        self.register.take().unwrap_or('"')
     }
 
     /// The built-in keys of the mode.
@@ -412,11 +479,12 @@ impl Helix {
             'o' => self.open_below(view),
             'O' => self.open_above(view),
             'y' => {
-                self.yank(view);
-                let n = self.register.len();
+                let n = self.yank(view);
                 let plural = if n == 1 { "" } else { "s" };
                 ui::show_message(&format!("yanked {n} selection{plural}"));
             }
+            '.' => self.repeat(count),
+            '"' => self.wait(Pending::Register, count),
             'd' => {
                 self.yank(view);
                 delete_selections(view);
@@ -516,6 +584,10 @@ impl Helix {
             },
             Pending::MatchPair { around } => select_pairs(view, c, around),
             Pending::Object { forward } => goto_object(view, c, forward, count.unwrap_or(1)),
+            Pending::Register => {
+                self.register = Some(c);
+                self.register_fresh = true;
+            }
             Pending::Space => {
                 let command = match c {
                     'f' => "picker.files",
@@ -792,33 +864,42 @@ impl Helix {
         }
     }
 
-    fn yank(&mut self, view: &View) {
+    /// Copies the selections into the register, and returns how many.
+    /// `_` keeps nothing.
+    fn yank(&mut self, view: &View) -> usize {
         let doc = Doc::new(view.buffer());
-        self.register = view
+        let values: Vec<String> = view
             .selection()
             .ranges
             .iter()
             .map(|r| doc.slice(r.anchor.min(r.head), r.anchor.max(r.head)))
             .collect();
+        let count = values.len();
+        let register = self.take_register();
+        if register != '_' {
+            self.registers.insert(register, values);
+        }
+        count
     }
 
     /// `p` pastes after each selection, `P` before it. Text yanked by whole
     /// lines goes after or before the line instead. The pasted text ends up
     /// selected.
     fn paste(&mut self, view: &View, before: bool) {
-        if self.register.is_empty() {
-            ui::show_message("nothing is yanked");
+        let register = self.take_register();
+        let Some(values) = self.registers.get(&register).filter(|v| !v.is_empty()) else {
+            ui::show_message(&format!("register {register} is empty"));
             return;
-        }
+        };
         let doc = Doc::new(view.buffer());
-        let last = self.register.len() - 1;
+        let last = values.len() - 1;
         let changes = view
             .selection()
             .ranges
             .iter()
             .enumerate()
             .map(|(i, r)| {
-                let value = &self.register[i.min(last)];
+                let value = &values[i.min(last)];
                 let (from, to) = (r.anchor.min(r.head), r.anchor.max(r.head));
                 // The pasted text is selected; a line break added in front of
                 // it is not.

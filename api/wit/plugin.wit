@@ -169,6 +169,47 @@ interface settings {
     get: func(key: string) -> option<string>;
 }
 
+/// The syntax trees the core keeps for buffers with a language. Every
+/// function brings the buffer's tree up to date first, so it reflects edits
+/// made earlier in the same call. Buffers without a tree give `none` or an
+/// empty list.
+interface syntax {
+    use types.{offset};
+    use editor.{buffer};
+
+    /// A node of a buffer's syntax tree, as it was when returned. Nodes are
+    /// values: `parent` and `children` find them again by `id` and range,
+    /// and after the buffer changes they may no longer find them.
+    record node {
+        /// Tells apart nodes with the same range, e.g. an expression
+        /// statement and the call it consists of.
+        id: u64,
+        /// The grammar's name for it, e.g. "function_item" or "(".
+        kind: string,
+        /// False for punctuation and keywords, which grammars name by their
+        /// text.
+        named: bool,
+        start: offset,
+        end: offset,
+    }
+
+    /// The name of the buffer's language.
+    language: func(buf: borrow<buffer>) -> option<string>;
+    /// The smallest node covering `start..end`, or with `named`, the
+    /// smallest named one.
+    node-at: func(buf: borrow<buffer>, start: offset, end: offset, named: bool) -> option<node>;
+    parent: func(buf: borrow<buffer>, of: node) -> option<node>;
+    /// All children in order, named or not.
+    children: func(buf: borrow<buffer>, of: node) -> list<node>;
+    /// Runs the language's query named `query`, e.g. "textobjects", over
+    /// `start..end`, and returns where `capture` matched, in order. When one
+    /// match captures several nodes under that name, as with
+    /// `(line_comment)+ @comment.around`, they make one range from the first
+    /// to the last. Each range appears once. Empty when the language has no
+    /// such query.
+    captures: func(buf: borrow<buffer>, query: string, capture: string, start: offset, end: offset) -> list<tuple<offset, offset>>;
+}
+
 interface guest {
     use types.{key-event};
 
@@ -192,6 +233,7 @@ world plugin {
     import commands;
     import ui;
     import settings;
+    import syntax;
 
     export guest;
 }

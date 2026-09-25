@@ -50,6 +50,7 @@ world plugin {
     import input;
     import commands;
     import ui;
+    import syntax;
     import events;
     import timers;
     import process;   // 宣言がなければ、呼ぶと permission-denied を返す
@@ -166,6 +167,50 @@ interface editor {
 - 正規表現の検索は、コアが `find` / `find-all` として提供する。プラグインが自前で検索すると、大きなバッファの全文を毎回コピーすることになるため。
 - 縦移動（`j` / `k`）、スクロール、表示範囲は、画面の配置を知っているコアが計算する。プラグインは画面の行と列を知らないまま、これらの操作を書ける。
 
+## 構文木
+
+構文木はコアが持ち、プラグインは `syntax` インターフェースで読む。テキストオブジェクト（`maf` など）、選択の拡大（`Alt-o`）、括弧の対応をプラグインが書けるようにするため。
+
+```wit
+interface syntax {
+    use types.{offset};
+    use editor.{buffer};
+
+    /// 構文木のノード。返したときの構文木での値
+    record node {
+        /// 同じ範囲のノード（式文とその中の呼び出しなど）を区別する
+        id: u64,
+        /// 文法での名前。"function_item" や "("
+        kind: string,
+        /// 記号やキーワードは false
+        named: bool,
+        start: offset,
+        end: offset,
+    }
+
+    /// バッファの言語。構文木がなければ none
+    language: func(buf: borrow<buffer>) -> option<string>;
+    /// start..end を覆う最も小さいノード。named なら名前つきのノードに限る
+    node-at: func(buf: borrow<buffer>, start: offset, end: offset, named: bool) -> option<node>;
+    parent: func(buf: borrow<buffer>, of: node) -> option<node>;
+    /// 名前つきでないものも含めて、先頭から順に
+    children: func(buf: borrow<buffer>, of: node) -> list<node>;
+    /// 言語のクエリ query（"textobjects" など）を start..end に実行し、
+    /// capture という名前の捕獲の範囲を先頭から順に返す
+    captures: func(buf: borrow<buffer>, query: string, capture: string,
+                   start: offset, end: offset) -> list<tuple<offset, offset>>;
+}
+```
+
+- ノードはリソースではなく値で渡す。tree-sitter のノードは構文木への参照なので、編集をまたいで持ち続けられない。`parent` と `children` は、渡されたノードを `id` と範囲で構文木から探し直す。
+  - バッファが変わると、古いノードは見つからないことがある。そのときは `none` や空のリストを返す。プラグインは編集のたびに `node-at` からやり直す。
+- 呼ばれたとき、構文木が古ければ（同じ呼び出しの中で `apply` した直後など）その場で解析し直してから答える。隠れているバッファも、このときに解析する。
+- 構文木のないバッファ（言語がない、文法の読み込みに失敗した）では、`none` や空のリストを返す。プラグインはテキストだけの処理に戻ればよい。
+- `captures` は、1 つのマッチで同じ名前の捕獲が複数のノードにかかったとき（`(line_comment)+ @comment.around` など）、最初から最後までを 1 つの範囲にまとめる。同じ範囲は 1 度だけ返す。
+  - 範囲と重なるマッチをすべて返す。カーソルを囲む関数を探すなら、カーソルの位置だけを渡して、返った範囲から選ぶ。
+  - 言語がそのクエリを持っていなければ空のリストを返す。クエリの誤りは、言語プラグインのバグとしてメッセージで知らせる。
+- クエリの捕獲の名前は Helix にそろえる（`function.inside` / `function.around`、`class.*`、`parameter.*`、`comment.*`、`test.*`）。言語プラグインが対応すれば、キーマッププラグインは言語ごとの違いを知らずに済む。
+
 ## コマンド
 
 - `commands.register(name, description)` で登録する。登録名の前には、マニフェストの `name` が自動で付く（`move_next_word` → `helix.move_next_word`）。
@@ -266,6 +311,6 @@ Helix 風キーマップで nib 自身を編集するのに必要なものだけ
 | `events`（`buffer-changed`、`custom`） | ○ |
 | `ui.open-popup`、装飾 | M1 のあと |
 | `timers`、`process`、権限の宣言 | M1 のあと（LSP と一緒） |
-| 構文木の API | M1 のあと（tree-sitter と一緒） |
+| 構文木の API | M2.2 |
 | Go SDK | M1 のあと |
 

@@ -1,5 +1,7 @@
 //! Host side of `nib:plugin`: what plugins can call.
 
+use std::ops::Range as ByteRange;
+
 use wasmtime::component::Resource;
 use wasmtime_wasi::{WasiCtxView, WasiView};
 
@@ -12,6 +14,7 @@ use crate::history::UndoMode;
 use crate::input::{KeyCode, KeyEvent};
 use crate::layout;
 use crate::selection::{Range, Selection};
+use crate::syntax::{self as trees, NodeInfo};
 use crate::ui::{Panel, Side, Span, StatusItem, StyledLine};
 use crate::{Edit, Error};
 
@@ -30,7 +33,9 @@ pub(crate) mod bindings {
     });
 }
 
-use bindings::nib::plugin::{commands, editor, input, settings, types as wit, ui as wit_ui};
+use bindings::nib::plugin::{
+    commands, editor, input, settings, syntax, types as wit, ui as wit_ui,
+};
 
 /// A buffer as seen by a plugin. The resource's rep is the buffer index.
 pub struct BufferHandle;
@@ -64,6 +69,21 @@ impl PluginData {
             .buffers
             .get_mut(handle.rep() as usize)
             .ok_or_else(|| wasmtime::Error::msg("the buffer no longer exists"))
+    }
+
+    /// The buffer's index and `start..end` clamped to its text, for the
+    /// syntax API, which answers out-of-range questions with nothing rather
+    /// than errors.
+    fn buffer_range(
+        &mut self,
+        handle: &Resource<BufferHandle>,
+        start: u64,
+        end: u64,
+    ) -> HostResult<(usize, ByteRange<usize>)> {
+        let len = self.buffer(handle)?.len();
+        let clamp = |offset: u64| usize::try_from(offset).unwrap_or(usize::MAX).min(len);
+        let start = clamp(start);
+        Ok((handle.rep() as usize, start..clamp(end).max(start)))
     }
 
     fn view_state(&mut self, handle: &Resource<ViewHandle>) -> HostResult<&mut State> {
@@ -321,6 +341,106 @@ impl editor::HostView for PluginData {
 
     fn drop(&mut self, _view: Resource<ViewHandle>) -> HostResult<()> {
         Ok(())
+    }
+}
+
+impl syntax::Host for PluginData {
+    fn language(&mut self, buffer: Resource<BufferHandle>) -> HostResult<Option<String>> {
+        let (index, _) = self.buffer_range(&buffer, 0, 0)?;
+        Ok(self.state()?.with_tree(index, |languages, language, _, _| {
+            languages.name(language).to_string()
+        }))
+    }
+
+    fn node_at(
+        &mut self,
+        buffer: Resource<BufferHandle>,
+        start: u64,
+        end: u64,
+        named: bool,
+    ) -> HostResult<Option<syntax::Node>> {
+        let (index, range) = self.buffer_range(&buffer, start, end)?;
+        let found = self
+            .state()?
+            .with_tree(index, |_, _, tree, _| trees::node_at(tree, range, named));
+        Ok(found.flatten().map(wit_node))
+    }
+
+    fn parent(
+        &mut self,
+        buffer: Resource<BufferHandle>,
+        of: syntax::Node,
+    ) -> HostResult<Option<syntax::Node>> {
+        let (index, _) = self.buffer_range(&buffer, 0, 0)?;
+        let of = node_info(of);
+        let found = self
+            .state()?
+            .with_tree(index, |_, _, tree, _| trees::parent(tree, &of));
+        Ok(found.flatten().map(wit_node))
+    }
+
+    fn children(
+        &mut self,
+        buffer: Resource<BufferHandle>,
+        of: syntax::Node,
+    ) -> HostResult<Vec<syntax::Node>> {
+        let (index, _) = self.buffer_range(&buffer, 0, 0)?;
+        let of = node_info(of);
+        let found = self
+            .state()?
+            .with_tree(index, |_, _, tree, _| trees::children(tree, &of));
+        Ok(found
+            .unwrap_or_default()
+            .into_iter()
+            .map(wit_node)
+            .collect())
+    }
+
+    fn captures(
+        &mut self,
+        buffer: Resource<BufferHandle>,
+        query: String,
+        capture: String,
+        start: u64,
+        end: u64,
+    ) -> HostResult<Vec<(u64, u64)>> {
+        let (index, range) = self.buffer_range(&buffer, start, end)?;
+        let state = self.state()?;
+        let found = state.with_tree(index, |languages, language, tree, text| {
+            languages.captures(language, &query, &capture, tree, text, range)
+        });
+        match found {
+            Some(Ok(found)) => Ok(found
+                .into_iter()
+                .map(|r| (r.start as u64, r.end as u64))
+                .collect()),
+            // A broken query is the language plugin's bug, not the caller's.
+            Some(Err(err)) => {
+                state.message = Some(format!("syntax: {err}"));
+                Ok(Vec::new())
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+}
+
+fn wit_node(node: NodeInfo) -> syntax::Node {
+    syntax::Node {
+        id: node.id,
+        kind: node.kind,
+        named: node.named,
+        start: node.range.start as u64,
+        end: node.range.end as u64,
+    }
+}
+
+fn node_info(node: syntax::Node) -> NodeInfo {
+    let offset = |o: u64| usize::try_from(o).unwrap_or(usize::MAX);
+    NodeInfo {
+        id: node.id,
+        kind: node.kind,
+        named: node.named,
+        range: offset(node.start)..offset(node.end),
     }
 }
 

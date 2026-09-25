@@ -2,12 +2,15 @@
 //! plugins provide; parsing and highlighting stay in the core because every
 //! plugin shares them and they run on every edit and frame.
 
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use ropey::Rope;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{InputEdit, Language, Parser, Point, Query, QueryCursor, Tree, WasmStore};
+use tree_sitter::{
+    InputEdit, Language, Node, Parser, Point, Query, QueryCursor, TextProvider, Tree, WasmStore,
+};
 use wasmtime::{Cache, CacheConfig, Config, Engine};
 
 use crate::grid::Style;
@@ -33,17 +36,33 @@ struct Entry {
 enum EntryState {
     Pending {
         grammar: Vec<u8>,
-        highlights: Option<String>,
+        /// Sources by name.
+        queries: BTreeMap<String, String>,
     },
     Loaded {
         language: Language,
-        highlights: Option<Highlights>,
+        highlights: Option<Query>,
+        /// The other queries, compiled when first run.
+        queries: BTreeMap<String, QueryState>,
     },
     Failed(String),
 }
 
-struct Highlights {
-    query: Query,
+enum QueryState {
+    Source(String),
+    Ready(Query),
+    /// Reported once; runs as a query without matches afterwards.
+    Failed,
+}
+
+/// A syntax node as the plugin API hands it out: a value, since tree-sitter
+/// nodes borrow their tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeInfo {
+    pub id: u64,
+    pub kind: String,
+    pub named: bool,
+    pub range: Range<usize>,
 }
 
 /// The syntax of one buffer.
@@ -74,15 +93,12 @@ impl Languages {
         name: &str,
         file_types: Vec<String>,
         grammar: Vec<u8>,
-        highlights: Option<String>,
+        queries: BTreeMap<String, String>,
     ) {
         let entry = Entry {
             name: name.to_string(),
             file_types,
-            state: EntryState::Pending {
-                grammar,
-                highlights,
-            },
+            state: EntryState::Pending { grammar, queries },
         };
         match self.list.iter().position(|e| e.name == name) {
             Some(i) => self.list[i] = entry,
@@ -98,17 +114,22 @@ impl Languages {
         }
         let EntryState::Pending {
             grammar,
-            highlights,
+            mut queries,
         } = std::mem::replace(&mut self.list[id].state, EntryState::Failed(String::new()))
         else {
             unreachable!("checked above");
         };
         let name = self.list[id].name.clone();
+        let highlights = queries.remove("highlights");
         let loaded = self.load(&name, &grammar, highlights.as_deref());
         self.list[id].state = match loaded {
             Ok((language, highlights)) => EntryState::Loaded {
                 language,
                 highlights,
+                queries: queries
+                    .into_iter()
+                    .map(|(name, source)| (name, QueryState::Source(source)))
+                    .collect(),
             },
             Err(err) => EntryState::Failed(format!("{name}: {err}")),
         };
@@ -123,7 +144,7 @@ impl Languages {
         name: &str,
         grammar: &[u8],
         highlights: Option<&str>,
-    ) -> Result<(Language, Option<Highlights>), String> {
+    ) -> Result<(Language, Option<Query>), String> {
         if self.engine.is_none() {
             let mut config = Config::new();
             if let Some(dir) = &self.cache_dir {
@@ -144,13 +165,13 @@ impl Languages {
             .map_err(|err| err.to_string())?;
         let language = loaded.map_err(|err| err.to_string())?;
         let highlights = highlights
-            .map(|source| {
-                let query =
-                    Query::new(&language, source).map_err(|err| format!("highlights: {err}"))?;
-                Ok::<_, String>(Highlights { query })
-            })
+            .map(|source| Query::new(&language, source).map_err(|err| format!("highlights: {err}")))
             .transpose()?;
         Ok((language, highlights))
+    }
+
+    pub fn name(&self, id: usize) -> &str {
+        &self.list[id].name
     }
 
     /// The language for a file, by its extension.
@@ -206,22 +227,14 @@ impl Languages {
         // Looked up per frame, so theme changes show at once; queries have
         // a few dozen captures.
         let capture_styles: Vec<Option<Style>> = highlights
-            .query
             .capture_names()
             .iter()
             .map(|name| theme.style(name))
             .collect();
         let mut cursor = QueryCursor::new();
         cursor.set_byte_range(range.clone());
-        let node_text = |node: tree_sitter::Node| {
-            text.byte_slice(node.byte_range())
-                .chunks()
-                .map(str::as_bytes)
-                .collect::<Vec<_>>()
-                .into_iter()
-        };
         let mut spans = Vec::new();
-        let mut captures = cursor.captures(&highlights.query, tree.root_node(), node_text);
+        let mut captures = cursor.captures(highlights, tree.root_node(), node_text(text));
         while let Some((found, index)) = captures.next() {
             let capture = found.captures()[*index];
             if let Some(style) = capture_styles[capture.index as usize] {
@@ -230,6 +243,117 @@ impl Languages {
         }
         paint(&mut styles, range.start, spans);
         styles
+    }
+
+    /// Where `capture` of the query `name` matched in `range`, one range per
+    /// match, sorted and without repeats. Compiles the query the first time;
+    /// the error comes back once, and later runs find nothing.
+    pub fn captures(
+        &mut self,
+        language: usize,
+        name: &str,
+        capture: &str,
+        tree: &Tree,
+        text: &Rope,
+        range: Range<usize>,
+    ) -> Result<Vec<Range<usize>>, String> {
+        let entry = &mut self.list[language];
+        let EntryState::Loaded {
+            language, queries, ..
+        } = &mut entry.state
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(state) = queries.get_mut(name) else {
+            return Ok(Vec::new());
+        };
+        if let QueryState::Source(source) = state {
+            match Query::new(language, source) {
+                Ok(query) => *state = QueryState::Ready(query),
+                Err(err) => {
+                    *state = QueryState::Failed;
+                    return Err(format!("{} {name}: {err}", entry.name));
+                }
+            }
+        }
+        let QueryState::Ready(query) = state else {
+            return Ok(Vec::new());
+        };
+        let Some(index) = query.capture_index_for_name(capture) else {
+            return Ok(Vec::new());
+        };
+        let mut cursor = QueryCursor::new();
+        cursor.set_byte_range(range);
+        let mut found = Vec::new();
+        let mut matches = cursor.matches(query, tree.root_node(), node_text(text));
+        while let Some(m) = matches.next() {
+            let span = m
+                .captures()
+                .iter()
+                .filter(|c| c.index == index)
+                .map(|c| c.node.byte_range())
+                .reduce(|a, b| a.start.min(b.start)..a.end.max(b.end));
+            found.extend(span);
+        }
+        found.sort_by_key(|r| (r.start, r.end));
+        found.dedup();
+        Ok(found)
+    }
+}
+
+fn node_text<'a>(text: &'a Rope) -> impl TextProvider<&'a [u8]> + 'a {
+    |node: Node| {
+        text.byte_slice(node.byte_range())
+            .chunks()
+            .map(str::as_bytes)
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+}
+
+fn info(node: Node) -> NodeInfo {
+    NodeInfo {
+        id: node.id() as u64,
+        kind: node.kind().to_string(),
+        named: node.is_named(),
+        range: node.byte_range(),
+    }
+}
+
+/// The smallest node covering `range`, or the smallest named one.
+pub(crate) fn node_at(tree: &Tree, range: Range<usize>, named: bool) -> Option<NodeInfo> {
+    let root = tree.root_node();
+    let node = if named {
+        root.named_descendant_for_byte_range(range.start, range.end)
+    } else {
+        root.descendant_for_byte_range(range.start, range.end)
+    };
+    node.map(info)
+}
+
+pub(crate) fn parent(tree: &Tree, of: &NodeInfo) -> Option<NodeInfo> {
+    find(tree, of)?.parent().map(info)
+}
+
+pub(crate) fn children(tree: &Tree, of: &NodeInfo) -> Vec<NodeInfo> {
+    let Some(node) = find(tree, of) else {
+        return Vec::new();
+    };
+    let mut cursor = node.walk();
+    node.children(&mut cursor).map(info).collect()
+}
+
+/// Finds a node handed out earlier. Nodes with its range cover the smallest
+/// node there, so it is among that node's ancestors if it still exists.
+fn find<'t>(tree: &'t Tree, of: &NodeInfo) -> Option<Node<'t>> {
+    let mut node = tree
+        .root_node()
+        .descendant_for_byte_range(of.range.start, of.range.end)?;
+    loop {
+        if node.id() as u64 == of.id {
+            return (node.byte_range() == of.range).then_some(node);
+        }
+        node = node.parent()?;
     }
 }
 

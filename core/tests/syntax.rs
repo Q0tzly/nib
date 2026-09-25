@@ -3,7 +3,7 @@
 
 use std::{env, fs};
 
-use nib_core::{Color, Editor, Grid, KeyEvent};
+use nib_core::{Color, Editor, Grid, KeyCode, KeyEvent, Modifiers, Range, Selection};
 
 mod common;
 use common::{plugin_dir, screen, type_keys};
@@ -91,4 +91,180 @@ fn startup_breakdown() {
         println!("{round}: total {:?}", started.elapsed());
     }
     let _ = fs::remove_dir_all(&cache);
+}
+
+const SOURCE: &str = "\
+// one
+// two
+fn add(a: u8, b: u8) -> u8 {
+    let s = \"}\";
+    a + b
+}
+
+fn other() {}
+";
+
+/// An editor on a Rust file with the keymap and the language, parsed.
+fn rust_editor(name: &str) -> (Editor, std::path::PathBuf) {
+    rust_editor_with(name, SOURCE)
+}
+
+fn rust_editor_with(name: &str, source: &str) -> (Editor, std::path::PathBuf) {
+    let path = env::temp_dir().join(format!("nib-{}-{name}.rs", std::process::id()));
+    fs::write(&path, source).unwrap();
+    let mut editor = Editor::default();
+    editor.open(&path).unwrap();
+    editor.load_plugin(&plugin_dir("helix")).unwrap();
+    editor.load_plugin(&plugin_dir("rust")).unwrap();
+    editor.resize(40, 12);
+    editor.catch_up();
+    (editor, path)
+}
+
+/// Puts a block cursor on the first `at` in the text.
+fn put_cursor(editor: &mut Editor, at: &str) {
+    let pos = SOURCE.find(at).unwrap();
+    editor.view_mut().selection =
+        Selection::new(vec![Range::new(pos, pos + 1)], 0, editor.buffer().text()).unwrap();
+}
+
+fn selected(editor: &Editor) -> String {
+    let range = editor.view().selection.primary();
+    editor
+        .buffer()
+        .text()
+        .slice(range.from()..range.to())
+        .to_string()
+}
+
+fn alt(code: KeyCode) -> KeyEvent {
+    KeyEvent {
+        code,
+        modifiers: Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        },
+    }
+}
+
+#[test]
+fn selects_text_objects() {
+    let (mut editor, path) = rust_editor("objects");
+    put_cursor(&mut editor, "a + b");
+    type_keys(&mut editor, "maf");
+    assert!(selected(&editor).starts_with("fn add(") && selected(&editor).ends_with("b\n}"));
+    put_cursor(&mut editor, "a + b");
+    type_keys(&mut editor, "mif");
+    assert!(selected(&editor).starts_with("{\n    let"));
+
+    put_cursor(&mut editor, "a: u8");
+    type_keys(&mut editor, "maa");
+    assert_eq!(selected(&editor), "a: u8,");
+    put_cursor(&mut editor, "b: u8");
+    type_keys(&mut editor, "mia");
+    assert_eq!(selected(&editor), "b: u8");
+
+    // Consecutive line comments are one comment.
+    put_cursor(&mut editor, "one");
+    type_keys(&mut editor, "mac");
+    assert_eq!(selected(&editor), "// one\n// two");
+
+    // Not in a function: nothing changes.
+    put_cursor(&mut editor, "one");
+    type_keys(&mut editor, "maf");
+    assert_eq!(selected(&editor), "o");
+    fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn jumps_between_text_objects() {
+    let (mut editor, path) = rust_editor("jumps");
+    put_cursor(&mut editor, "one");
+    type_keys(&mut editor, "]f");
+    assert!(selected(&editor).starts_with("fn add("));
+    type_keys(&mut editor, "]f");
+    assert_eq!(selected(&editor), "fn other() {}");
+    type_keys(&mut editor, "[f");
+    assert!(selected(&editor).starts_with("fn add("));
+    // Backward jumps put the cursor at the start.
+    let range = editor.view().selection.primary();
+    assert!(range.head < range.anchor);
+
+    put_cursor(&mut editor, "one");
+    type_keys(&mut editor, "2]a");
+    assert_eq!(selected(&editor), "b: u8");
+    fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn jumps_across_long_gaps() {
+    // Farther apart than the first window the keymap searches.
+    let gap = "// padding\n".repeat(2000);
+    let source = format!("fn first() {{}}\n{gap}fn second() {{}}\n{gap}");
+    let (mut editor, path) = rust_editor_with("gaps", &source);
+    type_keys(&mut editor, "]f");
+    assert_eq!(selected(&editor), "fn second() {}");
+    type_keys(&mut editor, "]f");
+    assert_eq!(selected(&editor), "fn second() {}");
+    type_keys(&mut editor, "[f");
+    assert_eq!(selected(&editor), "fn first() {}");
+    fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn expands_shrinks_and_walks_nodes() {
+    let (mut editor, path) = rust_editor("nodes");
+    // Without an Alt-o to undo, Alt-i goes to the first named child.
+    let start = SOURCE.find("(a: u8").unwrap();
+    let end = SOURCE.find(" -> u8").unwrap();
+    editor.view_mut().selection =
+        Selection::new(vec![Range::new(start, end)], 0, editor.buffer().text()).unwrap();
+    editor.handle_key(alt(KeyCode::Char('i')));
+    assert_eq!(selected(&editor), "a: u8");
+
+    put_cursor(&mut editor, "a + b");
+    editor.handle_key(alt(KeyCode::Char('o')));
+    assert_eq!(selected(&editor), "a + b");
+    editor.handle_key(alt(KeyCode::Up));
+    assert!(selected(&editor).starts_with("{\n    let"));
+    editor.handle_key(alt(KeyCode::Char('i')));
+    assert_eq!(selected(&editor), "a + b");
+    editor.handle_key(alt(KeyCode::Down));
+    assert_eq!(selected(&editor), "a");
+
+    put_cursor(&mut editor, "(a: u8");
+    editor.handle_key(alt(KeyCode::Char('o')));
+    assert_eq!(selected(&editor), "(a: u8, b: u8)");
+
+    put_cursor(&mut editor, "a: u8");
+    editor.handle_key(alt(KeyCode::Char('o')));
+    assert_eq!(selected(&editor), "a: u8");
+    editor.handle_key(alt(KeyCode::Char('n')));
+    assert_eq!(selected(&editor), "b: u8");
+    editor.handle_key(alt(KeyCode::Char('p')));
+    assert_eq!(selected(&editor), "a: u8");
+    fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn matches_pairs_with_the_tree() {
+    let (mut editor, path) = rust_editor("pairs");
+    // The text alone would stop at the brace in the string.
+    put_cursor(&mut editor, "{\n    let");
+    type_keys(&mut editor, "mm");
+    let close = SOURCE.find("}\n\nfn other").unwrap();
+    assert_eq!(editor.view().cursor(editor.buffer().text()), close);
+    type_keys(&mut editor, "mm");
+    assert_eq!(
+        editor.view().cursor(editor.buffer().text()),
+        SOURCE.find("{\n    let").unwrap()
+    );
+
+    put_cursor(&mut editor, "a + b");
+    type_keys(&mut editor, "mi{");
+    assert!(selected(&editor).starts_with("\n    let s = \"}\";"));
+    put_cursor(&mut editor, "}\";");
+    type_keys(&mut editor, "ma\"");
+    assert_eq!(selected(&editor), "\"}\"");
+    fs::remove_file(&path).unwrap();
 }

@@ -6,6 +6,7 @@
 //! about modes; they live here.
 
 mod doc;
+mod tree;
 
 use std::cell::RefCell;
 
@@ -37,8 +38,10 @@ enum Pending {
     Replace,
     /// `m`, for matching pairs.
     Match,
-    /// `mi` and `ma`, waiting for the pair's char.
+    /// `mi` and `ma`, waiting for the pair's char or the object's key.
     MatchPair { around: bool },
+    /// `]` and `[`, waiting for the object's key.
+    Object { forward: bool },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -86,6 +89,8 @@ struct Helix {
     register: Vec<String>,
     /// The last search pattern, for `n` and `N`.
     search: Option<String>,
+    /// Selections before and after each `Alt-o`, so `Alt-i` can go back.
+    expansions: Vec<(Selection, Selection)>,
 }
 
 thread_local! {
@@ -100,6 +105,7 @@ thread_local! {
             command_line: None,
             register: Vec::new(),
             search: None,
+            expansions: Vec::new(),
         })
     };
 }
@@ -199,8 +205,15 @@ impl Helix {
             self.scroll(view, amount);
             return true;
         }
-        if ev.modifiers == Modifiers::ALT && ev.code == KeyCode::Char(';') {
-            flip_selections(view);
+        if ev.modifiers == Modifiers::ALT {
+            match ev.code {
+                KeyCode::Char(';') => flip_selections(view),
+                KeyCode::Char('o') | KeyCode::Up => self.expand(view),
+                KeyCode::Char('i') | KeyCode::Down => self.shrink(view),
+                KeyCode::Char('n') | KeyCode::Right => select_siblings(view, true),
+                KeyCode::Char('p') | KeyCode::Left => select_siblings(view, false),
+                _ => return false,
+            }
             return true;
         }
         match ev.code {
@@ -338,6 +351,8 @@ impl Helix {
                 self.search = Some(pattern);
             }
             'm' => self.wait(Pending::Match, count),
+            ']' => self.wait(Pending::Object { forward: true }, count),
+            '[' => self.wait(Pending::Object { forward: false }, count),
             _ => return false,
         }
         true
@@ -363,13 +378,16 @@ impl Helix {
             Pending::Replace => replace_with(view, c),
             Pending::Match => match c {
                 'm' => self.move_cursors(view, 1, |doc, pos| {
-                    doc::matching_bracket(doc, pos).unwrap_or(pos)
+                    tree::matching_pair(&doc.buffer, pos)
+                        .or_else(|| doc::matching_bracket(doc, pos))
+                        .unwrap_or(pos)
                 }),
                 'i' => self.pending = Some(Pending::MatchPair { around: false }),
                 'a' => self.pending = Some(Pending::MatchPair { around: true }),
                 _ => {}
             },
             Pending::MatchPair { around } => select_pairs(view, c, around),
+            Pending::Object { forward } => goto_object(view, c, forward, count.unwrap_or(1)),
             Pending::Goto => {
                 let goto: fn(&Doc, u64, Option<u64>) -> u64 = match c {
                     'g' => |doc, _, count| doc.line_start(count.map_or(0, |n| n.saturating_sub(1))),
@@ -399,6 +417,49 @@ impl Helix {
                 self.move_cursors(view, 1, |doc, pos| goto(doc, pos, count));
             }
         }
+    }
+
+    /// `Alt-o`: grows every selection to the syntax node around it.
+    fn expand(&mut self, view: &View) {
+        let buffer = view.buffer();
+        let before = view.selection();
+        let ranges = before
+            .ranges
+            .iter()
+            .map(|r| {
+                let (start, end) = (r.anchor.min(r.head), r.anchor.max(r.head));
+                tree::expand(&buffer, start, end).map_or(*r, |(s, e)| range(s, e))
+            })
+            .collect();
+        set_ranges(view, ranges, before.primary);
+        let after = view.selection();
+        if after != before {
+            self.expansions.push((before, after));
+        }
+    }
+
+    /// `Alt-i`: undoes the last `Alt-o`, or without one, shrinks every
+    /// selection to the first named node inside it.
+    fn shrink(&mut self, view: &View) {
+        let current = view.selection();
+        match self.expansions.pop() {
+            Some((before, after)) if after == current => {
+                let _ = view.set_selection(&before);
+                return;
+            }
+            // The selection changed since: the history no longer applies.
+            _ => self.expansions.clear(),
+        }
+        let buffer = view.buffer();
+        let ranges = current
+            .ranges
+            .iter()
+            .map(|r| {
+                let (start, end) = (r.anchor.min(r.head), r.anchor.max(r.head));
+                tree::shrink(&buffer, start, end).map_or(*r, |(s, e)| range(s, e))
+            })
+            .collect();
+        set_ranges(view, ranges, current.primary);
     }
 
     /// Moves every cursor with `to`, `count` times. In select mode the
@@ -1231,16 +1292,79 @@ fn select_matches(view: &View, pattern: &str) {
 
 /// `mi` and `ma`: selects inside or around the pair of `c` around each
 /// cursor.
+/// `mi` and `ma`: selects a text object, or the inside or all of a pair.
 fn select_pairs(view: &View, c: char, around: bool) {
+    let doc = Doc::new(view.buffer());
+    let selection = view.selection();
+    let object = tree::object_name(c).map(|name| {
+        let part = if around { "around" } else { "inside" };
+        format!("{name}.{part}")
+    });
+    let ranges = selection
+        .ranges
+        .iter()
+        .map(|r| {
+            let pos = cursor(&doc, r);
+            if let Some(capture) = &object {
+                return tree::object_around(&doc.buffer, capture, pos)
+                    .map_or(*r, |(start, end)| range(start, end));
+            }
+            // The tree knows which brackets are in strings and comments;
+            // the text is the fallback, e.g. inside a comment.
+            let pair = tree::surrounding_pair(&doc.buffer, pos, c)
+                .or_else(|| doc::surrounding_pair(&doc, pos, c));
+            match pair {
+                Some((open, close)) if around => range(open, close + 1),
+                Some((open, close)) => range(open + 1, close),
+                None => *r,
+            }
+        })
+        .collect();
+    set_ranges(view, ranges, selection.primary);
+}
+
+/// `]f`, `[f`, and so on: selects the next or previous text object.
+fn goto_object(view: &View, c: char, forward: bool, count: u64) {
+    let Some(name) = tree::object_name(c) else {
+        return;
+    };
+    // Jumping between arguments means landing on them, not their commas.
+    let part = if c == 'a' { "inside" } else { "around" };
+    let capture = format!("{name}.{part}");
     let doc = Doc::new(view.buffer());
     let selection = view.selection();
     let ranges = selection
         .ranges
         .iter()
-        .map(|r| match doc::surrounding_pair(&doc, cursor(&doc, r), c) {
-            Some((open, close)) if around => range(open, close + 1),
-            Some((open, close)) => range(open + 1, close),
-            None => *r,
+        .map(|r| {
+            // Backward from the start of the selection, so `[f` after `]f`
+            // does not find the function it selected.
+            let from = if forward {
+                cursor(&doc, r)
+            } else {
+                r.anchor.min(r.head)
+            };
+            let found = tree::next_object(&doc.buffer, &capture, from, forward, count);
+            match found {
+                Some((start, end)) if forward => range(start, end),
+                Some((start, end)) => range(end, start),
+                None => *r,
+            }
+        })
+        .collect();
+    set_ranges(view, ranges, selection.primary);
+}
+
+/// `Alt-n` and `Alt-p`: selects the next or previous syntax node.
+fn select_siblings(view: &View, forward: bool) {
+    let buffer = view.buffer();
+    let selection = view.selection();
+    let ranges = selection
+        .ranges
+        .iter()
+        .map(|r| {
+            let (start, end) = (r.anchor.min(r.head), r.anchor.max(r.head));
+            tree::sibling(&buffer, start, end, forward).map_or(*r, |(s, e)| range(s, e))
         })
         .collect();
     set_ranges(view, ranges, selection.primary);

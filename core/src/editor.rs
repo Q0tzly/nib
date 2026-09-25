@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
+use ropey::Rope;
+use tree_sitter::Tree;
+
 use crate::Error;
 use crate::buffer::Buffer;
 use crate::config::{Config, PluginConfig, Settings};
@@ -87,11 +90,16 @@ impl State {
         }
     }
 
-    /// Parses the shown buffer if it changed since the last parse, loading
-    /// its grammar the first time. Hidden buffers wait until they are shown.
-    /// Returns whether it parsed.
+    /// Parses the shown buffer if it changed since the last parse. Hidden
+    /// buffers wait until they are shown. Returns whether it parsed.
     pub fn update_syntax(&mut self) -> bool {
-        let buffer = &mut self.buffers[self.view.buffer];
+        self.parse(self.view.buffer)
+    }
+
+    /// Parses buffer `index` if it changed since the last parse, loading its
+    /// grammar the first time. Returns whether it parsed.
+    fn parse(&mut self, index: usize) -> bool {
+        let buffer = &mut self.buffers[index];
         let text = buffer.text().clone();
         let Some(syntax) = buffer.syntax.as_mut().filter(|s| s.dirty) else {
             return false;
@@ -111,6 +119,24 @@ impl State {
             }
         }
         true
+    }
+
+    /// Runs `f` with the up-to-date syntax tree of buffer `index`, if it has
+    /// one, and the id of its language.
+    pub(crate) fn with_tree<R>(
+        &mut self,
+        index: usize,
+        f: impl FnOnce(&mut Languages, usize, &Tree, &Rope) -> R,
+    ) -> Option<R> {
+        self.parse(index);
+        let buffer = &self.buffers[index];
+        let syntax = buffer.syntax.as_ref()?;
+        Some(f(
+            &mut self.languages,
+            syntax.language,
+            syntax.tree.as_ref()?,
+            buffer.text(),
+        ))
     }
 
     /// Highlight styles for the bytes in `range` of the shown buffer, if it

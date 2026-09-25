@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -20,12 +21,15 @@ pub(crate) struct Manifest {
 /// A language the plugin provides: a tree-sitter grammar as WebAssembly and
 /// its queries, as files in the plugin.
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) struct LanguageManifest {
     pub name: String,
     pub file_types: Vec<String>,
     pub grammar: String,
-    pub highlights: Option<String>,
+    /// Query files by name. The core uses "highlights"; plugins can run any
+    /// of them through the syntax API.
+    #[serde(default)]
+    pub queries: BTreeMap<String, String>,
 }
 
 pub(crate) fn read(path: &Path) -> Result<Manifest, Error> {

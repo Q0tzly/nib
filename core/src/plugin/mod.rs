@@ -3,6 +3,7 @@
 mod api;
 mod manifest;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -319,20 +320,19 @@ impl Editor {
             let grammar = source
                 .read(&language.grammar)?
                 .ok_or_else(|| format!("{} is missing", language.grammar))?;
-            let highlights = match &language.highlights {
-                Some(path) => {
-                    let bytes = source
-                        .read(path)?
-                        .ok_or_else(|| format!("{path} is missing"))?;
-                    Some(String::from_utf8(bytes).map_err(|_| format!("{path} is not UTF-8"))?)
-                }
-                None => None,
-            };
+            let mut queries = BTreeMap::new();
+            for (name, path) in &language.queries {
+                let bytes = source
+                    .read(path)?
+                    .ok_or_else(|| format!("{path} is missing"))?;
+                let text = String::from_utf8(bytes).map_err(|_| format!("{path} is not UTF-8"))?;
+                queries.insert(name.clone(), text);
+            }
             self.state_mut().languages.add(
                 &language.name,
                 language.file_types.clone(),
                 grammar,
-                highlights,
+                queries,
             );
         }
         if !manifest.languages.is_empty() {

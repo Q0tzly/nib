@@ -111,9 +111,19 @@ M1 のゴールは、Helix 風キーマップのプラグインだけで、nib �
 - config.toml の `[theme]` による色の上書き
 - 設定を `config.toml`（コア）と `plugins/<name>.toml`（プラグインごと）に分け、`nib config init` / `nib config path` / `nib plugin list` を足した（プラグインごとの上限もここで設定できる）
 
-### M2.2 以降
+### M2.2 構文木の API
 
-- プラグインが構文木を使う API と、構文木を使うテキストオブジェクト（`maf`、`Alt-o` など）。`mm` などの括弧の対応も構文木で直す
+> 完了（2026-09-25）。3,455 行の Rust ファイルで、`]f` は中央値 3.6 ms（カーソルの近くから探す範囲を広げていく。ファイルの終わりまで一度に探すと 9 ms）、`Alt-o` は 2.6 ms。
+
+- プラグインが構文木を読む `syntax` インターフェース（ノードの検索、親と子、クエリの捕獲）
+- 言語プラグインのクエリを `[languages.queries]` に名前で並べる形にする（`highlights` のほかに `textobjects` など）
+- Rust の `textobjects` クエリ
+- helix プラグインの、構文木を使うキー（[keymap.md](keymap.md) の「M2.2 で実装するキー」）
+
+確かめ方: nib のソースで、`maf`、`]f`、`Alt-o` / `Alt-i`、文字列の中に括弧がある行での `mm` を試す。
+
+### M2.3 以降
+
 - 装飾とポップアップ
 - ほかの言語
 

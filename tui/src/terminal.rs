@@ -27,6 +27,11 @@ pub fn run(editor: &mut Editor) -> io::Result<()> {
             std::mem::swap(&mut prev, &mut next);
             prev_cursor = cursor;
         }
+        // Work left for after the frame, such as highlighting a file just
+        // opened, then draw again before waiting for keys.
+        if editor.catch_up() {
+            continue;
+        }
 
         handle(editor, event::read()?);
         // Handle everything already queued, then draw once.

@@ -25,8 +25,21 @@ pub(crate) struct Languages {
 struct Entry {
     name: String,
     file_types: Vec<String>,
-    language: Language,
-    highlights: Option<Highlights>,
+    state: EntryState,
+}
+
+/// Grammars load the first time a file of their type is shown, so languages
+/// that are not used cost nothing at startup.
+enum EntryState {
+    Pending {
+        grammar: Vec<u8>,
+        highlights: Option<String>,
+    },
+    Loaded {
+        language: Language,
+        highlights: Option<Highlights>,
+    },
+    Failed(String),
 }
 
 struct Highlights {
@@ -56,14 +69,63 @@ impl Default for Languages {
 }
 
 impl Languages {
-    /// Adds a language, replacing one of the same name.
+    /// Registers a language, replacing one of the same name. Its grammar is
+    /// loaded when first needed.
     pub fn add(
         &mut self,
         name: &str,
         file_types: Vec<String>,
+        grammar: Vec<u8>,
+        highlights: Option<String>,
+    ) {
+        let entry = Entry {
+            name: name.to_string(),
+            file_types,
+            state: EntryState::Pending {
+                grammar,
+                highlights,
+            },
+        };
+        match self.list.iter().position(|e| e.name == name) {
+            Some(i) => self.list[i] = entry,
+            None => self.list.push(entry),
+        }
+    }
+
+    fn ensure_loaded(&mut self, id: usize) -> Result<(), String> {
+        match &self.list[id].state {
+            EntryState::Loaded { .. } => return Ok(()),
+            EntryState::Failed(err) => return Err(err.clone()),
+            EntryState::Pending { .. } => {}
+        }
+        let EntryState::Pending {
+            grammar,
+            highlights,
+        } = std::mem::replace(&mut self.list[id].state, EntryState::Failed(String::new()))
+        else {
+            unreachable!("checked above");
+        };
+        let name = self.list[id].name.clone();
+        let loaded = self.load(&name, &grammar, highlights.as_deref());
+        self.list[id].state = match loaded {
+            Ok((language, highlights)) => EntryState::Loaded {
+                language,
+                highlights,
+            },
+            Err(err) => EntryState::Failed(format!("{name}: {err}")),
+        };
+        match &self.list[id].state {
+            EntryState::Failed(err) => Err(err.clone()),
+            _ => Ok(()),
+        }
+    }
+
+    fn load(
+        &mut self,
+        name: &str,
         grammar: &[u8],
         highlights: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(Language, Option<Highlights>), String> {
         if self.engine.is_none() {
             let mut config = Config::new();
             if let Some(dir) = &self.cache_dir {
@@ -83,7 +145,6 @@ impl Languages {
             .set_wasm_store(store)
             .map_err(|err| err.to_string())?;
         let language = loaded.map_err(|err| err.to_string())?;
-
         let highlights = highlights
             .map(|source| {
                 let query =
@@ -96,18 +157,7 @@ impl Languages {
                 Ok::<_, String>(Highlights { query, styles })
             })
             .transpose()?;
-
-        let entry = Entry {
-            name: name.to_string(),
-            file_types,
-            language,
-            highlights,
-        };
-        match self.list.iter().position(|e| e.name == name) {
-            Some(i) => self.list[i] = entry,
-            None => self.list.push(entry),
-        }
-        Ok(())
+        Ok((language, highlights))
     }
 
     /// The language for a file, by its extension.
@@ -118,11 +168,21 @@ impl Languages {
             .position(|e| e.file_types.iter().any(|t| t == extension))
     }
 
-    /// Parses `text`, reusing `old` for the parts that did not change.
-    pub fn parse(&mut self, language: usize, text: &Rope, old: Option<&Tree>) -> Option<Tree> {
-        self.parser
-            .set_language(&self.list[language].language)
-            .ok()?;
+    /// Parses `text`, reusing `old` for the parts that did not change. Loads
+    /// the grammar first if needed.
+    pub fn parse(
+        &mut self,
+        id: usize,
+        text: &Rope,
+        old: Option<&Tree>,
+    ) -> Result<Option<Tree>, String> {
+        self.ensure_loaded(id)?;
+        let EntryState::Loaded { language, .. } = &self.list[id].state else {
+            unreachable!("loaded above");
+        };
+        if self.parser.set_language(language).is_err() {
+            return Ok(None);
+        }
         let mut read = |byte: usize, _: Point| -> &[u8] {
             if byte >= text.len_bytes() {
                 return &[];
@@ -130,7 +190,7 @@ impl Languages {
             let (chunk, start, _, _) = text.chunk_at_byte(byte);
             &chunk.as_bytes()[byte - start..]
         };
-        self.parser.parse_with_options(&mut read, old, None)
+        Ok(self.parser.parse_with_options(&mut read, old, None))
     }
 
     /// The highlight style of each byte in `range`, or `None` for plain text.
@@ -142,7 +202,11 @@ impl Languages {
         range: Range<usize>,
     ) -> Vec<Option<Style>> {
         let mut styles = vec![None; range.len()];
-        let Some(highlights) = &self.list[language].highlights else {
+        let EntryState::Loaded {
+            highlights: Some(highlights),
+            ..
+        } = &self.list[language].state
+        else {
             return styles;
         };
         let mut cursor = QueryCursor::new();

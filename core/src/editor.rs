@@ -86,18 +86,30 @@ impl State {
         }
     }
 
-    /// Parses the shown buffer if it changed since the last parse. Hidden
-    /// buffers wait until they are shown.
-    pub fn update_syntax(&mut self) {
+    /// Parses the shown buffer if it changed since the last parse, loading
+    /// its grammar the first time. Hidden buffers wait until they are shown.
+    /// Returns whether it parsed.
+    pub fn update_syntax(&mut self) -> bool {
         let buffer = &mut self.buffers[self.view.buffer];
         let text = buffer.text().clone();
         let Some(syntax) = buffer.syntax.as_mut().filter(|s| s.dirty) else {
-            return;
+            return false;
         };
-        syntax.tree = self
+        match self
             .languages
-            .parse(syntax.language, &text, syntax.tree.as_ref());
-        syntax.dirty = false;
+            .parse(syntax.language, &text, syntax.tree.as_ref())
+        {
+            Ok(tree) => {
+                syntax.tree = tree;
+                syntax.dirty = false;
+            }
+            Err(err) => {
+                // Shown without highlighting from now on.
+                buffer.syntax = None;
+                self.message = Some(format!("syntax: {err}"));
+            }
+        }
+        true
     }
 
     /// Highlight styles for the bytes in `range` of the shown buffer, if it
@@ -306,9 +318,14 @@ impl Editor {
     /// Opens `path` in the view. The initial empty buffer is replaced if it
     /// was never touched.
     pub fn open(&mut self, path: impl Into<PathBuf>) -> Result<(), Error> {
-        self.state_mut().open(path)?;
-        self.state_mut().update_syntax();
-        Ok(())
+        self.state_mut().open(path)
+    }
+
+    /// Does work left for after a frame, such as the first parse of a
+    /// buffer, so opening a file shows it before its highlighting. Returns
+    /// whether the screen needs drawing again.
+    pub fn catch_up(&mut self) -> bool {
+        self.state_mut().update_syntax()
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {

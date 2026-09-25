@@ -29,6 +29,10 @@ fn highlights_and_follows_edits() {
     editor.load_plugin(&plugin_dir("rust")).unwrap();
     editor.resize(40, 6);
 
+    // The first parse waits until after the first frame.
+    assert_eq!(fg(&editor, 0, 0), Color::Reset);
+    assert!(editor.catch_up());
+    assert!(!editor.catch_up());
     assert_eq!(fg(&editor, 0, 0), KEYWORD);
     assert_eq!(fg(&editor, 3, 0), FUNCTION);
     assert_eq!(fg(&editor, 3, 1), FUNCTION);
@@ -52,4 +56,39 @@ fn highlights_and_follows_edits() {
         "{rows:#?}"
     );
     fs::remove_file(&path).unwrap();
+}
+
+/// Prints where startup time goes, without and with the compile cache. Run
+/// with `cargo test --release -p nib-core --test syntax -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn startup_breakdown() {
+    use std::time::Instant;
+    let cache = env::temp_dir().join(format!("nib-{}-cache", std::process::id()));
+    let file = env!("CARGO_MANIFEST_DIR").to_string() + "/src/render.rs";
+    for round in ["cold cache", "warm cache"] {
+        let started = Instant::now();
+        let mut editor = Editor::default();
+        editor.set_plugin_cache_dir(Some(cache.clone()));
+        editor.resize(120, 40);
+        let mut last = Instant::now();
+        let mut step = |name: &str| {
+            println!("{round}: {name}: {:?}", last.elapsed());
+            last = Instant::now();
+        };
+        editor.load_plugin(&plugin_dir("helix")).unwrap();
+        step("load helix");
+        editor.load_plugin(&plugin_dir("rust")).unwrap();
+        step("load rust (grammar, query)");
+        editor.open(&file).unwrap();
+        step("open");
+        let mut grid = Grid::default();
+        editor.render(&mut grid);
+        step("first frame, without highlighting");
+        editor.catch_up();
+        editor.render(&mut grid);
+        step("load grammar, parse, and draw highlighted");
+        println!("{round}: total {:?}", started.elapsed());
+    }
+    let _ = fs::remove_dir_all(&cache);
 }

@@ -307,19 +307,15 @@ impl Editor {
                 }
                 None => None,
             };
-            self.state_mut()
-                .languages
-                .add(
-                    &language.name,
-                    language.file_types.clone(),
-                    &grammar,
-                    highlights.as_deref(),
-                )
-                .map_err(|err| format!("language {}: {err}", language.name))?;
+            self.state_mut().languages.add(
+                &language.name,
+                language.file_types.clone(),
+                grammar,
+                highlights,
+            );
         }
         if !manifest.languages.is_empty() {
             self.state_mut().attach_syntax();
-            self.state_mut().update_syntax();
         }
         Ok(())
     }

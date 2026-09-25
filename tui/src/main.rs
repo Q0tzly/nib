@@ -1,13 +1,17 @@
 mod draw;
 mod terminal;
 
+mod builtin {
+    include!(concat!(env!("OUT_DIR"), "/builtin_plugins.rs"));
+}
+
 use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use nib_core::{Config, Editor, PluginOptions};
+use nib_core::{Config, Editor, PluginOptions, plugin_name};
 
 const USAGE: &str = "usage: nib [--plugin DIR]... [FILE]...";
 
@@ -52,12 +56,11 @@ fn main() -> ExitCode {
         .plugins
         .iter()
         .map(|dir| expand_home(dir))
+        .chain(plugins)
         .collect();
-    for dir in configured.into_iter().chain(plugins) {
-        if let Err(err) = editor.load_plugin(&dir) {
-            eprintln!("nib: {err}");
-            return ExitCode::FAILURE;
-        }
+    if let Err(err) = load_plugins(&mut editor, &configured) {
+        eprintln!("nib: {err}");
+        return ExitCode::FAILURE;
     }
     if let Some(err) = config_error {
         editor.show_message(format!("{err}; using the defaults"));
@@ -68,6 +71,28 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// Loads the built-in plugins first, so the keymap is at the bottom of the
+/// input stack, then `dirs`. A plugin in `dirs` replaces a built-in one of
+/// the same name, e.g. while working on it.
+fn load_plugins(editor: &mut Editor, dirs: &[PathBuf]) -> Result<(), nib_core::Error> {
+    let replaced = dirs
+        .iter()
+        .map(|dir| plugin_name(dir))
+        .collect::<Result<Vec<_>, _>>()?;
+    for (name, manifest, wasm) in builtin::PLUGINS {
+        if !replaced.iter().any(|r| r == name) {
+            editor.load_builtin_plugin(manifest, wasm)?;
+        }
+    }
+    for dir in dirs {
+        editor.load_plugin(dir)?;
+    }
+    if builtin::PLUGINS.is_empty() {
+        editor.show_message("built without the standard plugins; run `cargo xtask build-plugins`");
+    }
+    Ok(())
 }
 
 fn load_config() -> Result<Config, String> {

@@ -28,6 +28,8 @@ cargo test --workspace
 
 `api/wit/` を変えたら `cargo xtask build-plugins` をやり直す。古いプラグインは読み込みで型が合わずに失敗する。
 
+`nib` の実行ファイルは、ビルド時に `target/plugins/` にある標準プラグイン（helix）を埋め込む（`tui/build.rs`）。プラグインを変えたら `cargo xtask build-plugins` のあとで `nib` をビルドし直す。
+
 ## ライセンス
 
 - リポジトリ全体は `MIT OR Apache-2.0`。

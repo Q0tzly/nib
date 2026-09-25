@@ -22,6 +22,11 @@ use api::bindings::exports::nib::plugin::guest::KeyResult;
 
 pub type PluginId = usize;
 
+/// Reads the name of the plugin in `dir` from its manifest.
+pub fn plugin_name(dir: &Path) -> Result<String, Error> {
+    Ok(manifest::read(&dir.join("plugin.toml"))?.name)
+}
+
 /// The version of `nib:plugin` this host implements.
 pub const API_VERSION: &str = "0.1";
 

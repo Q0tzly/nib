@@ -25,7 +25,7 @@ pub use error::Error;
 pub use grid::{Cell, Color, Cursor, CursorShape, Grid, Style, Symbol};
 pub use history::UndoMode;
 pub use input::{KeyCode, KeyEvent, Modifiers};
-pub use plugin::{API_VERSION, PluginInfo, PluginOptions};
+pub use plugin::{API_VERSION, PluginInfo, PluginOptions, plugin_name};
 pub use selection::{Range, Selection};
 pub use ui::{Side, Span, StyledLine};
 pub use view::View;

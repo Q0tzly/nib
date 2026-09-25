@@ -58,8 +58,6 @@ interface editor {
         /// A selection needs at least one range and a primary index in bounds.
         invalid-selection,
         invalid-pattern(string),
-        /// The buffer or view no longer exists.
-        closed,
     }
 
     resource buffer {

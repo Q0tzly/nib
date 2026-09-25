@@ -83,19 +83,22 @@ impl Editor {
             .path()
             .map_or_else(|| "[scratch]".into(), |path| path.display().to_string());
         let modified = if buffer.is_modified() { " [+]" } else { "" };
-        grid.put_str(1, y, &format!("{name}{modified}"), style);
+        let mut left = format!("{name}{modified}");
+        if let Some(message) = self.message() {
+            left = format!("{left}  {message}");
+        }
+        grid.put_str(1, y, &left, style);
 
         let text = buffer.text();
         let cursor = self.view().cursor(text);
         let line = text.byte_to_line(cursor);
         let before_cursor: Cow<str> = text.byte_slice(text.line_to_byte(line)..cursor).into();
         let column = before_cursor.graphemes(true).count();
-        let right = format!(
-            "{}  {}:{} ",
-            self.emergency_keys_hint(),
-            line + 1,
-            column + 1
-        );
+        let position = format!("{}:{} ", line + 1, column + 1);
+        let right = match self.emergency_keys_hint() {
+            Some(hint) => format!("{hint}  {position}"),
+            None => position,
+        };
         let right_width: u16 = right.graphemes(true).map(display_width).sum();
         if let Some(x) = grid.width().checked_sub(right_width) {
             grid.put_str(x, y, &right, style);

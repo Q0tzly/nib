@@ -2,7 +2,7 @@
 
 > ステータス: 合意済み（2026-09-25）
 
-[architecture.md](architecture.md) で決めたコアの構造を、プラグインから見た API に落とし込む。WIT の完全な定義は実装時に `api/` に置く。ここでは設計の方針と API の形を決める。
+[architecture.md](architecture.md) で決めたコアの構造を、プラグインから見た API に落とし込む。WIT の実際の定義は [api/wit/plugin.wit](../api/wit/plugin.wit) にあり、実装した範囲だけを載せている。ここでは M1 までの設計の方針と API の形を決める。
 
 ## 方針
 
@@ -110,7 +110,10 @@ interface types {
 interface editor {
     use types.{offset, selection, edit, undo-mode, cursor-shape};
 
-    variant error { stale-version, invalid-position, closed }
+    variant error {
+        stale-version, invalid-position, overlapping-edits,
+        invalid-selection, invalid-pattern(string),
+    }
 
     resource buffer {
         version: func() -> u64;
@@ -158,6 +161,7 @@ interface editor {
   - `new-step` は新しい 1 手を始める。
   - `merge` は直前の 1 手にまとめる。
   - 挿入モードでは、最初の打鍵を `new-step`、以降を `merge` にすれば、挿入全体が 1 手になる。
+- 閉じたバッファやビューの handle を使うと、プラグインはトラップする。プラグインのバグとして扱い、再起動の対象にする。
 - 書記素の境界は、コアが `next-grapheme` / `prev-grapheme` として提供する。プラグインごとに Unicode の表を持たなくて済み、描画とも結果が食い違わない。
 - 正規表現の検索は、コアが `find` / `find-all` として提供する。プラグインが自前で検索すると、大きなバッファの全文を毎回コピーすることになるため。
 - 縦移動（`j` / `k`）、スクロール、表示範囲は、画面の配置を知っているコアが計算する。プラグインは画面の行と列を知らないまま、これらの操作を書ける。

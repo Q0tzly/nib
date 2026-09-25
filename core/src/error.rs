@@ -18,6 +18,8 @@ pub enum Error {
     /// The buffer has no file path to save to.
     NoPath,
     Io(io::Error),
+    /// Loading or starting a plugin failed.
+    Plugin(String),
 }
 
 impl fmt::Display for Error {
@@ -32,6 +34,7 @@ impl fmt::Display for Error {
             Error::InvalidPattern(msg) => write!(f, "invalid pattern: {msg}"),
             Error::NoPath => f.write_str("buffer has no path"),
             Error::Io(err) => err.fmt(f),
+            Error::Plugin(msg) => f.write_str(msg),
         }
     }
 }

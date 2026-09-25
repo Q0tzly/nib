@@ -95,6 +95,9 @@ def run(name, argv, enter_insert, startup_only, n=300):
     os.kill(pid, 9); os.waitpid(pid, 0); os.close(fd)
 
     for label, (firsts, lasts) in results.items():
+        if not firsts:
+            print(f"  {label:11s} no response")
+            continue
         print(f"  {label:11s} first byte: median {statistics.median(firsts):.2f} ms  p99 {pct(firsts, .99):.2f} ms"
               f" | frame done: median {statistics.median(lasts):.2f} ms  p99 {pct(lasts, .99):.2f} ms  (n={len(firsts)})")
 

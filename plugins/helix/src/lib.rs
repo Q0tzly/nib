@@ -33,6 +33,8 @@ enum Pending {
     Goto,
     /// `f`, `t`, `F`, `T`, waiting for the char.
     Find(FindKind),
+    /// `r`, waiting for the replacement.
+    Replace,
 }
 
 struct CommandLine {
@@ -54,6 +56,8 @@ struct Helix {
     /// onto the last inserted grapheme, as Helix does.
     appending: bool,
     command_line: Option<CommandLine>,
+    /// What `y`, `d`, and `c` took, one value per selection.
+    register: Vec<String>,
 }
 
 thread_local! {
@@ -66,6 +70,7 @@ thread_local! {
             inserted: false,
             appending: false,
             command_line: None,
+            register: Vec::new(),
         })
     };
 }
@@ -241,13 +246,41 @@ impl Helix {
                 self.insert_at(view, |range| range.anchor.max(range.head));
                 self.appending = true;
             }
-            'o' => self.open_below(view),
-            'd' => {
-                delete_selections(view);
-                if self.mode == Mode::Select {
-                    self.set_mode(Mode::Normal);
-                }
+            'I' => {
+                let doc = Doc::new(view.buffer());
+                self.insert_at(view, |r| doc::first_non_blank(&doc, cursor(&doc, r)));
             }
+            'A' => {
+                let doc = Doc::new(view.buffer());
+                self.insert_at(view, |r| doc.line_end(cursor(&doc, r)));
+            }
+            'o' => self.open_below(view),
+            'O' => self.open_above(view),
+            'y' => {
+                self.yank(view);
+                let n = self.register.len();
+                let plural = if n == 1 { "" } else { "s" };
+                ui::show_message(&format!("yanked {n} selection{plural}"));
+            }
+            'd' => {
+                self.yank(view);
+                delete_selections(view);
+                to_blocks(view);
+                self.set_mode(Mode::Normal);
+            }
+            'c' => {
+                self.yank(view);
+                delete_selections(view);
+                self.start_insert();
+                // The deletion and what is typed next undo together.
+                self.inserted = true;
+            }
+            'p' => self.paste(view, false),
+            'P' => self.paste(view, true),
+            'r' => self.wait(Pending::Replace, count),
+            '>' => indent(view, true),
+            '<' => indent(view, false),
+            'J' => join_lines(view),
             'u' => {
                 if view.undo() {
                     to_blocks(view);
@@ -281,6 +314,7 @@ impl Helix {
                     doc::find_char(doc, pos, c, kind)
                 });
             }
+            Pending::Replace => replace_with(view, c),
             Pending::Goto => {
                 let goto: fn(&Doc, u64, Option<u64>) -> u64 = match c {
                     'g' => |doc, _, count| doc.line_start(count.map_or(0, |n| n.saturating_sub(1))),
@@ -465,6 +499,83 @@ impl Helix {
         set_ranges(view, ranges, selection.primary);
         self.start_insert();
         self.edit(view, &edits);
+    }
+
+    /// Opens a line above each cursor, indented like the cursor's line.
+    fn open_above(&mut self, view: &View) {
+        let doc = Doc::new(view.buffer());
+        let changes = view
+            .selection()
+            .ranges
+            .iter()
+            .map(|r| {
+                let pos = cursor(&doc, r);
+                let start = doc.line_start(doc.line_of(pos));
+                let indent = doc::indentation(&doc, pos);
+                let cursor_at = indent.len() as u64;
+                (
+                    insertion(start, format!("{indent}\n")),
+                    cursor_at,
+                    cursor_at,
+                )
+            })
+            .collect();
+        if apply_placing(view, changes, UndoMode::NewStep) {
+            self.start_insert();
+            self.inserted = true;
+        }
+    }
+
+    fn yank(&mut self, view: &View) {
+        let doc = Doc::new(view.buffer());
+        self.register = view
+            .selection()
+            .ranges
+            .iter()
+            .map(|r| doc.slice(r.anchor.min(r.head), r.anchor.max(r.head)))
+            .collect();
+    }
+
+    /// `p` pastes after each selection, `P` before it. Text yanked by whole
+    /// lines goes after or before the line instead. The pasted text ends up
+    /// selected.
+    fn paste(&mut self, view: &View, before: bool) {
+        if self.register.is_empty() {
+            ui::show_message("nothing is yanked");
+            return;
+        }
+        let doc = Doc::new(view.buffer());
+        let last = self.register.len() - 1;
+        let changes = view
+            .selection()
+            .ranges
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let value = &self.register[i.min(last)];
+                let (from, to) = (r.anchor.min(r.head), r.anchor.max(r.head));
+                // The pasted text is selected; a line break added in front of
+                // it is not.
+                let (pos, text, lead) = if value.ends_with('\n') {
+                    if before {
+                        (doc.line_start(doc.line_of(from)), value.clone(), 0)
+                    } else {
+                        let end = doc.line_end(cursor(&doc, r));
+                        if end < doc.len {
+                            (end + 1, value.clone(), 0)
+                        } else {
+                            // The last line has no line break to paste after.
+                            (end, format!("\n{}", &value[..value.len() - 1]), 1)
+                        }
+                    }
+                } else {
+                    (if before { from } else { to }, value.clone(), 0)
+                };
+                let len = text.len() as u64;
+                (insertion(pos, text), lead, len)
+            })
+            .collect();
+        apply_placing(view, changes, UndoMode::NewStep);
     }
 
     fn insert_key(&mut self, view: &View, ev: KeyEvent) -> bool {
@@ -821,13 +932,157 @@ fn delete_selections(view: &View) {
         let (from, to) = (r.anchor.min(r.head), r.anchor.max(r.head));
         (from < to).then(|| deletion(from, to))
     });
+    apply(view, &edits);
+}
+
+/// Applies `edits` as a new undo step, mapping the selections through them.
+fn apply(view: &View, edits: &[Edit]) -> bool {
     if edits.is_empty() {
-        return;
+        return false;
     }
     let version = view.buffer().version();
-    if view.apply(version, &edits, None, UndoMode::NewStep).is_ok() {
-        to_blocks(view);
-    }
+    view.apply(version, edits, None, UndoMode::NewStep).is_ok()
+}
+
+/// Applies one edit per selection and makes each selection
+/// `start..end`, counted in bytes from the start of its edit's text.
+fn apply_placing(view: &View, mut changes: Vec<(Edit, u64, u64)>, undo: UndoMode) -> bool {
+    changes.sort_by_key(|(edit, _, _)| edit.start);
+    let mut shift = 0i64;
+    let ranges = changes
+        .iter()
+        .map(|(edit, start, end)| {
+            let at = (edit.start as i64 + shift) as u64;
+            shift += edit.text.len() as i64 - (edit.end - edit.start) as i64;
+            range(at + start, at + end)
+        })
+        .collect::<Vec<_>>();
+    let edits: Vec<Edit> = changes.into_iter().map(|(edit, _, _)| edit).collect();
+    let primary = view.selection().primary;
+    let after = Selection {
+        primary: primary.min(ranges.len().saturating_sub(1) as u32),
+        ranges,
+    };
+    let version = view.buffer().version();
+    view.apply(version, &edits, Some(&after), undo).is_ok()
+}
+
+/// `r`: replaces every char of each selection with `c`, keeping line breaks.
+fn replace_with(view: &View, c: char) {
+    let doc = Doc::new(view.buffer());
+    let changes = view
+        .selection()
+        .ranges
+        .iter()
+        .filter(|r| r.anchor != r.head)
+        .map(|r| {
+            let (from, to) = (r.anchor.min(r.head), r.anchor.max(r.head));
+            let text: String = doc
+                .slice(from, to)
+                .chars()
+                .map(|ch| if ch == '\n' { ch } else { c })
+                .collect();
+            let len = text.len() as u64;
+            let (start, end) = if r.head < r.anchor {
+                (len, 0)
+            } else {
+                (0, len)
+            };
+            (
+                Edit {
+                    start: from,
+                    end: to,
+                    text,
+                },
+                start,
+                end,
+            )
+        })
+        .collect();
+    apply_placing(view, changes, UndoMode::NewStep);
+}
+
+/// The lines each selection touches, each once.
+fn selected_lines(doc: &Doc, view: &View) -> Vec<u64> {
+    let mut lines: Vec<u64> = view
+        .selection()
+        .ranges
+        .iter()
+        .flat_map(|r| {
+            let (from, to) = (r.anchor.min(r.head), r.anchor.max(r.head));
+            let last = doc.prev_grapheme(to).max(from);
+            doc.line_of(from)..=doc.line_of(last)
+        })
+        .collect();
+    lines.sort_unstable();
+    lines.dedup();
+    lines
+}
+
+/// `>` and `<`: indents or unindents the selected lines by one unit.
+fn indent(view: &View, more: bool) {
+    let doc = Doc::new(view.buffer());
+    let unit = indent_unit();
+    let width = if unit == "\t" { 1 } else { unit.len() };
+    let edits: Vec<Edit> = selected_lines(&doc, view)
+        .into_iter()
+        .filter_map(|line| {
+            let start = doc.line_start(line);
+            let leading = doc::indentation(&doc, start);
+            if more {
+                (doc.line_end(start) > start).then(|| insertion(start, unit.clone()))
+            } else {
+                // A tab counts as a whole unit.
+                let mut end = start;
+                for (i, c) in leading.chars().enumerate() {
+                    if i >= width {
+                        break;
+                    }
+                    end += c.len_utf8() as u64;
+                    if c == '\t' {
+                        break;
+                    }
+                }
+                (end > start).then(|| deletion(start, end))
+            }
+        })
+        .collect();
+    apply(view, &edits);
+}
+
+/// `J`: joins the selected lines, or the line with the next one, replacing
+/// each line break and the next line's indentation with a space.
+fn join_lines(view: &View) {
+    let doc = Doc::new(view.buffer());
+    let mut breaks: Vec<u64> = view
+        .selection()
+        .ranges
+        .iter()
+        .flat_map(|r| {
+            let (from, to) = (r.anchor.min(r.head), r.anchor.max(r.head));
+            let first = doc.line_of(from);
+            let last = doc.line_of(doc.prev_grapheme(to).max(from)).max(first + 1);
+            first..last
+        })
+        .collect();
+    breaks.sort_unstable();
+    breaks.dedup();
+    let edits: Vec<Edit> = breaks
+        .into_iter()
+        .filter(|&line| line + 1 < doc.line_count())
+        .map(|line| {
+            let newline = doc.line_end(doc.line_start(line));
+            let next = newline + 1;
+            let text_start = doc::first_non_blank(&doc, next);
+            let empty = text_start == doc.line_end(next);
+            Edit {
+                start: newline,
+                end: text_start,
+                text: if empty { String::new() } else { " ".into() },
+            }
+        })
+        .collect();
+    apply(view, &edits);
 }
 
 fn edits_for(view: &View, edit: impl Fn(&SelRange) -> Option<Edit>) -> Vec<Edit> {

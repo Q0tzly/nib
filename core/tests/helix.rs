@@ -268,3 +268,73 @@ fn half_page_scrolling_moves_view_and_cursor() {
     assert_eq!(editor.view().top_line, 0);
     assert_eq!(line(&editor), 5);
 }
+
+#[test]
+fn yanks_and_pastes_by_chars_and_by_lines() {
+    let mut editor = editor_with_text("hello world\n");
+    type_keys(&mut editor, "wye");
+    assert_eq!(primary(&editor), (6, 11));
+    type_keys(&mut editor, "p");
+    assert_eq!(text(&editor), "hello worldhello \n");
+    assert_eq!(primary(&editor), (11, 17));
+    type_keys(&mut editor, "u");
+    assert_eq!(text(&editor), "hello world\n");
+
+    let mut editor = editor_with_text("a\nb\n");
+    type_keys(&mut editor, "xyjp");
+    assert_eq!(text(&editor), "a\nb\na\n");
+    assert_eq!(primary(&editor), (4, 6));
+    type_keys(&mut editor, "ggP");
+    assert_eq!(text(&editor), "a\na\nb\na\n");
+
+    // After a last line without a line break.
+    let mut editor = editor_with_text("a\nb");
+    type_keys(&mut editor, "xyjp");
+    assert_eq!(text(&editor), "a\nb\na");
+    assert_eq!(primary(&editor), (4, 5));
+}
+
+#[test]
+fn delete_yanks_and_change_undoes_as_one_step() {
+    let mut editor = editor_with_text("abc");
+    type_keys(&mut editor, "dp");
+    assert_eq!(text(&editor), "bac");
+
+    let mut editor = editor_with_text("abc");
+    type_keys(&mut editor, "wcX<esc>");
+    assert_eq!(text(&editor), "X");
+    type_keys(&mut editor, "u");
+    assert_eq!(text(&editor), "abc");
+}
+
+#[test]
+fn replaces_indents_and_joins() {
+    let mut editor = editor_with_text("ab\ncd");
+    type_keys(&mut editor, "xrZ");
+    assert_eq!(text(&editor), "ZZ\ncd");
+
+    let mut editor = editor_with_text("a\n  b\n\nc");
+    type_keys(&mut editor, "xx>");
+    assert_eq!(text(&editor), "    a\n      b\n\nc");
+    type_keys(&mut editor, "<<");
+    assert_eq!(text(&editor), "a\nb\n\nc");
+
+    let mut editor = editor_with_text("a\n  b\n\nc");
+    type_keys(&mut editor, "J");
+    assert_eq!(text(&editor), "a b\n\nc");
+    type_keys(&mut editor, "J");
+    assert_eq!(text(&editor), "a b\nc");
+}
+
+#[test]
+fn inserts_at_line_ends_and_opens_above() {
+    let mut editor = editor_with_text("  ab\n");
+    type_keys(&mut editor, "AX<esc>");
+    assert_eq!(text(&editor), "  abX\n");
+    type_keys(&mut editor, "IY<esc>");
+    assert_eq!(text(&editor), "  YabX\n");
+    type_keys(&mut editor, "OZ<esc>");
+    assert_eq!(text(&editor), "  Z\n  YabX\n");
+    type_keys(&mut editor, "u");
+    assert_eq!(text(&editor), "  YabX\n");
+}

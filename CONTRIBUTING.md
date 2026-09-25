@@ -22,7 +22,13 @@ cargo test --workspace
 cargo run --release -p nib-tui -- FILE
 ```
 
-The plugins live in their own workspace, so check them with `--manifest-path plugins/Cargo.toml` (and `--target wasm32-wasip2` for clippy). CI runs the same checks.
+The plugins live in their own workspace, so check them with `--manifest-path plugins/Cargo.toml`: clippy with `--target wasm32-wasip2`, and their unit tests natively. CI runs the same checks.
+
+```sh
+cargo fmt --all --manifest-path plugins/Cargo.toml
+cargo clippy --manifest-path plugins/Cargo.toml --workspace --target wasm32-wasip2 -- -D warnings
+cargo test --manifest-path plugins/Cargo.toml --workspace
+```
 
 ## Licensing of contributions
 

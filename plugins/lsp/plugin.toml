@@ -3,4 +3,4 @@ version = "0.1.0"
 api = "0.1"
 # Runs the language servers.
 capabilities = ["process"]
-events = ["buffer-opened", "buffer-changed", "buffer-saved"]
+events = ["buffer-opened", "buffer-changed", "buffer-saved", "helix.mode_changed"]

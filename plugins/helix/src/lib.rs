@@ -767,6 +767,7 @@ impl Helix {
                 }
                 self.set_mode(Mode::Normal);
             }
+            KeyCode::Char('x') if ev.modifiers == Modifiers::CTRL => call_or_show("lsp.complete"),
             KeyCode::Char(c) if ev.modifiers.is_empty() => self.insert_text(view, &c.to_string()),
             KeyCode::Enter => {
                 let doc = Doc::new(view.buffer());

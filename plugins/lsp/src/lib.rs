@@ -1,8 +1,10 @@
 //! Language Server Protocol client (docs/lsp.md). It starts a server for a
 //! language when a file of it is opened, keeps the server's copy of each
-//! file in sync, and shows diagnostics, hovers, and definitions. Servers
-//! answer through process events, so nothing here waits for them.
+//! file in sync, and shows diagnostics, hovers, definitions, and
+//! completions. Servers answer through process events, so nothing here
+//! waits for them.
 
+mod complete;
 mod position;
 mod rpc;
 
@@ -13,9 +15,11 @@ use nib_plugin::exports::nib::plugin::guest::{Guest, KeyResult};
 use nib_plugin::nib::plugin::editor::{self, Buffer};
 use nib_plugin::nib::plugin::events::{BufferChange, Event};
 use nib_plugin::nib::plugin::process::{self, Child, Stream};
-use nib_plugin::nib::plugin::types::{KeyEvent, SelRange, Selection, Span};
+use nib_plugin::nib::plugin::types::{
+    Edit, KeyCode, KeyEvent, Modifiers, SelRange, Selection, Span, UndoMode,
+};
 use nib_plugin::nib::plugin::ui::{self, Decoration, Note, Popup, PopupAnchor, Side};
-use nib_plugin::nib::plugin::{commands, input, syntax};
+use nib_plugin::nib::plugin::{commands, input, syntax, timers};
 use serde_json::{Value, json};
 
 /// Servers used unless `[settings.servers]` says otherwise.
@@ -32,6 +36,10 @@ const HOVER_LINES: usize = 20;
 const HOVER_WIDTH: usize = 100;
 /// How much of a server's error output is kept, to say why it stopped.
 const STDERR_KEPT: usize = 4096;
+/// Completions shown at once.
+const COMPLETION_ROWS: usize = 10;
+/// How long typing pauses before completions are asked for on their own.
+const COMPLETION_DELAY_MS: u32 = 150;
 
 struct Server {
     language: String,
@@ -58,6 +66,19 @@ enum Request {
     Initialize,
     Hover { uri: String, offset: u64 },
     Definition,
+    Completion { uri: String, start: u64, auto: bool },
+}
+
+struct Completion {
+    popup: Popup,
+    uri: String,
+    /// Where the word being completed starts.
+    start: u64,
+    language: String,
+    items: Vec<complete::Item>,
+    /// Indices into `items` of the ones matching what is typed.
+    shown: Vec<usize>,
+    selected: usize,
 }
 
 struct Lsp {
@@ -69,8 +90,15 @@ struct Lsp {
     cwd: String,
     /// Diagnostics per severity, by URI, for the status line.
     counts: HashMap<String, [usize; 4]>,
-    /// Closed by the next key, which it takes with its own input layer.
+    /// Closed by the next key.
     hover: Option<Popup>,
+    completion: Option<Completion>,
+    /// An input layer is pushed while a hover or completions are shown.
+    layer: bool,
+    /// The keymap is in insert mode, where completions come on their own.
+    inserting: bool,
+    /// The timer that asks for completions after a pause in typing.
+    timer: Option<u64>,
 }
 
 thread_local! {
@@ -112,6 +140,8 @@ impl Guest for Plugin {
             "Show what the language server says about the cursor",
         );
         commands::register("definition", "Go to the definition at the cursor");
+        commands::register("complete", "Show completions for the word at the cursor");
+        commands::register("status", "Say which language servers run");
         LSP.with_borrow_mut(|lsp| {
             *lsp = Some(Lsp {
                 commands: servers,
@@ -120,34 +150,48 @@ impl Guest for Plugin {
                 cwd: editor::working_directory(),
                 counts: HashMap::new(),
                 hover: None,
+                completion: None,
+                layer: false,
+                inserting: false,
+                timer: None,
             })
         });
         Ok(())
     }
 
-    fn handle_key(_ev: KeyEvent) -> KeyResult {
+    fn handle_key(ev: KeyEvent) -> KeyResult {
         with_lsp(|lsp| {
-            if lsp.hover.take().is_some() {
-                input::pop_layer();
+            if lsp.completion.is_some() && lsp.completion_key(ev) {
+                return KeyResult::Handled;
             }
-        });
-        // The key still does what it would have done.
-        KeyResult::Pass
+            // Anything else closes what is shown, and still does what it
+            // would have done.
+            lsp.close_popups();
+            KeyResult::Pass
+        })
     }
 
     fn run_command(name: String, _args: String) -> Result<String, String> {
         with_lsp(|lsp| match name.as_str() {
-            "hover" => lsp.ask_at_cursor("textDocument/hover", true),
-            "definition" => lsp.ask_at_cursor("textDocument/definition", false),
+            "hover" => lsp
+                .ask_at_cursor("textDocument/hover", true)
+                .map(|()| "null".into()),
+            "definition" => lsp
+                .ask_at_cursor("textDocument/definition", false)
+                .map(|()| "null".into()),
+            "complete" => lsp.complete(false).map(|()| "null".into()),
+            "status" => Ok(lsp.status()),
             _ => Err(format!("no command {name}")),
         })
-        .map(|()| "null".into())
     }
 
     fn on_event(ev: Event) {
         with_lsp(|lsp| match ev {
             Event::BufferOpened(buffer) => lsp.opened(&buffer),
-            Event::BufferChanged(change) => lsp.changed(&change),
+            Event::BufferChanged(change) => {
+                lsp.changed(&change);
+                lsp.typed(&change);
+            }
             Event::BufferSaved(buffer) => lsp.saved(&buffer),
             Event::ProcessOutput(output) => {
                 let Some(i) = lsp.server_of(output.process) else {
@@ -179,7 +223,22 @@ impl Guest for Plugin {
                 });
                 lsp.failed.insert(server.language);
             }
-            Event::Custom(_) | Event::Timer(_) => {}
+            Event::Custom(custom) => {
+                if custom.name == "helix.mode_changed" {
+                    lsp.inserting = custom.data == "\"insert\"";
+                    if !lsp.inserting {
+                        lsp.close_popups();
+                    }
+                }
+            }
+            Event::Timer(id) => {
+                if lsp.timer == Some(id) {
+                    lsp.timer = None;
+                    if lsp.inserting && lsp.completion.is_none() && lsp.worth_completing() {
+                        let _ = lsp.complete(true);
+                    }
+                }
+            }
         })
     }
 }
@@ -401,6 +460,10 @@ impl Lsp {
             }
             Request::Hover { uri, offset } => self.show_hover(&uri, offset, result),
             Request::Definition => self.go_to_definition(i, result),
+            Request::Completion { uri, start, auto } => {
+                let language = self.servers[i].language.clone();
+                self.show_completions(uri, start, language, auto, result);
+            }
         }
     }
 
@@ -484,9 +547,218 @@ impl Lsp {
             return;
         }
         let lines: Vec<Vec<Span>> = lines.iter().map(|line| vec![span(line, "")]).collect();
-        let popup = Popup::new(PopupAnchor::Position(offset), &lines);
-        if self.hover.replace(popup).is_none() {
+        self.hover = Some(Popup::new(PopupAnchor::Position(offset), &lines));
+        self.take_keys();
+    }
+
+    /// One line per language: "<language> ready", "starting", or
+    /// "stopped".
+    fn status(&self) -> String {
+        let running = self.servers.iter().map(|server| {
+            let state = if server.ready { "ready" } else { "starting" };
+            format!("{} {state}", server.language)
+        });
+        let stopped = self
+            .failed
+            .iter()
+            .map(|language| format!("{language} stopped"));
+        running.chain(stopped).collect::<Vec<_>>().join("\n")
+    }
+
+    fn take_keys(&mut self) {
+        if !self.layer {
             input::push_layer();
+            self.layer = true;
+        }
+    }
+
+    fn close_popups(&mut self) {
+        self.hover = None;
+        self.completion = None;
+        if self.layer {
+            input::pop_layer();
+            self.layer = false;
+        }
+    }
+
+    /// The primary cursor in the shown buffer, where insert mode types.
+    fn cursor() -> (Buffer, u64) {
+        let view = editor::active_view();
+        let selection = view.selection();
+        (
+            view.buffer(),
+            selection.ranges[selection.primary as usize].head,
+        )
+    }
+
+    /// Asks for completions of the word before the cursor.
+    fn complete(&mut self, auto: bool) -> Result<(), String> {
+        let (buffer, cursor) = Self::cursor();
+        let (i, uri) = self
+            .open_document(&buffer)
+            .ok_or("no language server for this file")?;
+        let start = word_start(&buffer, cursor);
+        let server = &mut self.servers[i];
+        let (line, character) = position::to_lsp(&buffer, cursor, server.utf8);
+        let params = json!({
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": character},
+            "context": {"triggerKind": 1},
+        });
+        let request = Request::Completion { uri, start, auto };
+        server.request("textDocument/completion", params, request);
+        Ok(())
+    }
+
+    /// After typing: narrows shown completions, or waits for a pause to ask
+    /// for them.
+    fn typed(&mut self, change: &BufferChange) {
+        if self.completion.is_some() {
+            self.narrow();
+            return;
+        }
+        let typed_word = change.changes.last().is_some_and(|c| {
+            c.start == c.end
+                && c.text
+                    .chars()
+                    .all(|ch| complete::is_word(ch) || ch == '.' || ch == ':')
+        });
+        if !self.inserting || !typed_word || self.open_document(&change.buffer).is_none() {
+            return;
+        }
+        if let Some(timer) = self.timer.take() {
+            timers::cancel(timer);
+        }
+        self.timer = Some(timers::set(COMPLETION_DELAY_MS));
+    }
+
+    /// Whether the cursor is after enough of a word, or after `.` or `::`,
+    /// for completions to be worth showing unasked.
+    fn worth_completing(&self) -> bool {
+        let (buffer, cursor) = Self::cursor();
+        let start = word_start(&buffer, cursor);
+        let before = buffer
+            .slice(start.saturating_sub(2), start)
+            .unwrap_or_default();
+        cursor - start >= 2 || before.ends_with('.') || before.ends_with("::")
+    }
+
+    fn show_completions(
+        &mut self,
+        uri: String,
+        start: u64,
+        language: String,
+        auto: bool,
+        result: &Value,
+    ) {
+        let (buffer, _) = Self::cursor();
+        // Typing may have left the file or the word meanwhile.
+        if self.uri(&buffer).as_deref() != Some(uri.as_str()) {
+            return;
+        }
+        let items = complete::items(result);
+        if items.is_empty() {
+            if !auto {
+                ui::show_message("no completions");
+            }
+            return;
+        }
+        self.completion = Some(Completion {
+            popup: Popup::new(PopupAnchor::Position(start), &[]),
+            uri,
+            start,
+            language,
+            items,
+            shown: Vec::new(),
+            selected: 0,
+        });
+        self.take_keys();
+        self.narrow();
+    }
+
+    /// Shows the completions matching the word typed so far, or closes
+    /// them when none match or the cursor left the word.
+    fn narrow(&mut self) {
+        let (buffer, cursor) = Self::cursor();
+        let uri = self.uri(&buffer);
+        let Some(completion) = &mut self.completion else {
+            return;
+        };
+        let typed = buffer.slice(completion.start, cursor).unwrap_or_default();
+        let in_word = uri.as_ref() == Some(&completion.uri)
+            && cursor >= completion.start
+            && typed.chars().all(complete::is_word);
+        completion.shown = if in_word {
+            complete::matching(&completion.items, &typed)
+        } else {
+            Vec::new()
+        };
+        if completion.shown.is_empty() {
+            self.close_popups();
+            return;
+        }
+        completion.selected = completion.selected.min(completion.shown.len() - 1);
+        completion.show();
+    }
+
+    /// Handles a key while completions are shown. Returns whether it was
+    /// one of theirs.
+    fn completion_key(&mut self, ev: KeyEvent) -> bool {
+        let Some(completion) = &mut self.completion else {
+            return false;
+        };
+        let ctrl = ev.modifiers == Modifiers::CTRL;
+        let plain = ev.modifiers.is_empty();
+        let step = match ev.code {
+            KeyCode::Char('n') if ctrl => 1,
+            KeyCode::Char('p') if ctrl => -1,
+            KeyCode::Down if plain => 1,
+            KeyCode::Up if plain => -1,
+            KeyCode::Tab | KeyCode::Enter if plain => {
+                self.accept();
+                return true;
+            }
+            _ => return false,
+        };
+        let count = completion.shown.len().min(COMPLETION_ROWS) as isize;
+        completion.selected = (completion.selected as isize + step).rem_euclid(count) as usize;
+        completion.show();
+        true
+    }
+
+    /// Replaces the word with the selected completion.
+    fn accept(&mut self) {
+        let Some(completion) = self.completion.take() else {
+            return;
+        };
+        self.close_popups();
+        let Some(&i) = completion.shown.get(completion.selected) else {
+            return;
+        };
+        let item = &completion.items[i];
+        let (buffer, cursor) = Self::cursor();
+        let utf8 = self
+            .servers
+            .iter()
+            .find(|s| s.language == completion.language)
+            .is_some_and(|s| s.utf8);
+        // The server's range ends where the cursor was when it answered;
+        // what was typed since is replaced too.
+        let (start, end) = match item.range {
+            Some(((line, character), (end_line, end_character))) => (
+                position::from_lsp(&buffer, line, character, utf8),
+                position::from_lsp(&buffer, end_line, end_character, utf8).max(cursor),
+            ),
+            None => (completion.start, cursor),
+        };
+        let edit = Edit {
+            start,
+            end,
+            text: item.text.clone(),
+        };
+        let view = editor::active_view();
+        if let Err(err) = view.apply(buffer.version(), &[edit], None, UndoMode::Merge) {
+            ui::show_message(&format!("lsp: {err:?}"));
         }
     }
 
@@ -543,6 +815,53 @@ impl Lsp {
             .into_iter()
             .find(|buffer| self.uri(buffer).as_deref() == Some(uri))
     }
+}
+
+impl Completion {
+    fn show(&self) {
+        let rows: Vec<&complete::Item> = self
+            .shown
+            .iter()
+            .take(COMPLETION_ROWS)
+            .map(|&i| &self.items[i])
+            .collect();
+        let width = rows
+            .iter()
+            .map(|item| item.label.chars().count())
+            .max()
+            .unwrap_or(0);
+        let lines: Vec<Vec<Span>> = rows
+            .iter()
+            .enumerate()
+            .map(|(row, item)| {
+                let style = if row == self.selected {
+                    "ui.menu.selected"
+                } else {
+                    ""
+                };
+                let detail: String = item.detail.chars().take(40).collect();
+                vec![
+                    span(&format!("{:width$}", item.label), style),
+                    span(&format!("  {detail}"), "comment"),
+                ]
+            })
+            .collect();
+        self.popup.update(&lines);
+    }
+}
+
+/// Where the word ending at `cursor` starts.
+fn word_start(buffer: &Buffer, cursor: u64) -> u64 {
+    let line = buffer.line_of(cursor).unwrap_or(0);
+    let line_start = buffer.line_start(line).unwrap_or(0);
+    let before = buffer.slice(line_start, cursor).unwrap_or_default();
+    let word: usize = before
+        .chars()
+        .rev()
+        .take_while(|&c| complete::is_word(c))
+        .map(char::len_utf8)
+        .sum();
+    cursor - word as u64
 }
 
 impl Server {

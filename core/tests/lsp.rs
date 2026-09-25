@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use std::{env, fs, panic, process, thread};
 
-use nib_core::{Config, Editor};
+use nib_core::{Config, Editor, KeyEvent};
 use serde_json::{Value, json};
 
 mod common;
@@ -29,7 +29,7 @@ fn main() {
         eprintln!("\nerror: not installed\nmore detail");
         process::exit(1);
     }
-    let tests: [(&str, fn()); 5] = [
+    let tests: [(&str, fn()); 7] = [
         ("diagnostics_follow_edits", diagnostics_follow_edits),
         (
             "hover_shows_until_the_next_key",
@@ -38,6 +38,11 @@ fn main() {
         ("definition_moves_the_cursor", definition_moves_the_cursor),
         ("missing_servers_are_reported", missing_servers_are_reported),
         ("servers_that_stop_say_why", servers_that_stop_say_why),
+        ("completes_when_asked", completes_when_asked),
+        (
+            "completes_on_its_own_and_narrows",
+            completes_on_its_own_and_narrows,
+        ),
     ];
     let mut failed = 0;
     for (name, test) in tests {
@@ -91,8 +96,16 @@ fn wait_until(editor: &mut Editor, what: &str, mut done: impl FnMut(&mut Editor)
     while !done(editor) {
         assert!(Instant::now() < deadline, "waited 20 seconds for {what}");
         editor.run_background();
+        editor.run_timers();
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// Waits until the server is initialized and has the file.
+fn wait_for_server(editor: &mut Editor) {
+    wait_until(editor, "the server", |e| {
+        e.call_command("lsp.status", "").unwrap() == "rust ready"
+    });
 }
 
 fn shows(editor: &Editor, text: &str) -> bool {
@@ -123,10 +136,8 @@ fn diagnostics_follow_edits() {
 fn hover_shows_until_the_next_key() {
     let (mut editor, dir) = fake("hover", "fn main() {}\n");
     type_keys(&mut editor, "l");
-    // The server needs to have the file first.
-    wait_until(&mut editor, "the server", |e| {
-        e.call_command("lsp.hover", "").is_ok()
-    });
+    wait_for_server(&mut editor);
+    type_keys(&mut editor, " k");
     wait_until(&mut editor, "the hover", |e| shows(e, "hover at 0:1"));
     // The key closes it and still moves the cursor.
     type_keys(&mut editor, "l");
@@ -137,15 +148,9 @@ fn hover_shows_until_the_next_key() {
 
 fn definition_moves_the_cursor() {
     let (mut editor, dir) = fake("definition", "fn main() {}\nmain();\n");
-    type_keys(&mut editor, "j");
-    // Fails until the server has the file.
-    wait_until(&mut editor, "the server", |e| {
-        e.call_command("lsp.definition", "").is_ok()
-    });
-    wait_until(&mut editor, "the definition", |e| cursor(e) == 3);
-    // Now from the keymap.
+    wait_for_server(&mut editor);
     type_keys(&mut editor, "jgd");
-    wait_until(&mut editor, "the definition from gd", |e| cursor(e) == 3);
+    wait_until(&mut editor, "the definition", |e| cursor(e) == 3);
     fs::remove_dir_all(dir).unwrap();
 }
 
@@ -167,6 +172,39 @@ fn servers_that_stop_say_why() {
     wait_until(&mut editor, "the server to stop", |e| {
         e.message() == Some(expected.as_str())
     });
+    fs::remove_dir_all(dir).unwrap();
+}
+
+fn line(editor: &Editor, n: usize) -> String {
+    editor.buffer().text().line(n).to_string()
+}
+
+fn completes_when_asked() {
+    let (mut editor, dir) = fake("complete", "fn main() {}\n");
+    wait_for_server(&mut editor);
+    type_keys(&mut editor, "oal");
+    editor.handle_key(KeyEvent::ctrl('x'));
+    wait_until(&mut editor, "completions", |e| shows(e, "alphabet"));
+    assert!(!shows(&editor, "beta"), "narrowed to what is typed");
+    // The second, then in, as a snippet without its marks.
+    editor.handle_key(KeyEvent::ctrl('n'));
+    type_keys(&mut editor, "<ret>");
+    assert_eq!(line(&editor, 1), "alphabet()\n");
+    assert!(!shows(&editor, "letters"));
+    assert!(screen(&editor).last().unwrap().starts_with(" INS "));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+fn completes_on_its_own_and_narrows() {
+    let (mut editor, dir) = fake("auto", "fn main() {}\n");
+    wait_for_server(&mut editor);
+    type_keys(&mut editor, "obe");
+    wait_until(&mut editor, "completions", |e| shows(e, "beta"));
+    // Nothing matches any more: it closes, and typing goes on.
+    type_keys(&mut editor, "x");
+    assert!(!shows(&editor, "beta"));
+    type_keys(&mut editor, "<esc>");
+    assert_eq!(line(&editor, 1), "bex\n");
     fs::remove_dir_all(dir).unwrap();
 }
 
@@ -224,6 +262,20 @@ fn fake_server() {
                     "start": {"line": 0, "character": 3},
                     "end": {"line": 0, "character": 7},
                 }}),
+            ),
+            "textDocument/completion" => reply(
+                &message,
+                json!({"isIncomplete": false, "items": [
+                    {"label": "beta", "detail": "b", "sortText": "3"},
+                    {"label": "alpha", "detail": "a letter", "sortText": "1"},
+                    {
+                        "label": "alphabet",
+                        "detail": "letters",
+                        "sortText": "2",
+                        "insertText": "alphabet($1)",
+                        "insertTextFormat": 2,
+                    },
+                ]}),
             ),
             "shutdown" => reply(&message, Value::Null),
             "exit" => return,

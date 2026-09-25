@@ -181,7 +181,7 @@ JSON を選んだのは、WIT に再帰する型がなく、任意の値の木�
 ## 入力
 
 - `input.push-layer()` で入力スタックに層を積み、`input.pop-layer()` で外す。キーは上の層から順に `handle-key` で届き、`pass` を返すと下の層に回る。
-- Ctrl-q はコアの予約キーなので、プラグインには届かない（[architecture.md](architecture.md) の「入力」）。
+- Ctrl-g はコアの予約キーなので、プラグインには届かない。利用者がコアメニューで Ctrl-g をもう一度押したときだけ、Ctrl-g として届く（[architecture.md](architecture.md) の「入力」）。
 - キーマッププラグインは `init` で 1 層積み、それを外さない。
 - 貼り付け（bracketed paste）は、キーではなく `paste` イベントとして届ける。
 

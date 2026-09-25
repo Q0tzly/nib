@@ -2,12 +2,11 @@ use std::borrow::Cow;
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::editor::Editor;
+use crate::editor::{Editor, Menu};
 use crate::grid::{Cursor, Grid, Style, display_width};
 
 const TAB_WIDTH: u16 = 4;
-const RESCUE_MENU: &str =
-    "[w] save all and quit  [q] quit without saving  [r] restart plugins  [any other key] back";
+const MAIN_MENU: &str = "[r] restart plugins  [w] save all and quit  [q] quit  [Ctrl-g] send Ctrl-g  [any other key] back";
 
 impl Editor {
     /// Draws the editor into `grid`, resizing it to the editor size.
@@ -79,9 +78,21 @@ impl Editor {
             ..Style::default()
         };
         grid.fill_row(0, y, style);
-        if self.in_rescue_menu() {
-            grid.put_str(1, y, RESCUE_MENU, style);
-            return;
+        match self.menu() {
+            Some(Menu::Main) => {
+                grid.put_str(1, y, MAIN_MENU, style);
+                return;
+            }
+            Some(Menu::ConfirmQuit) => {
+                let n = self.modified_buffers();
+                let prompt = format!(
+                    "quit without saving {n} modified buffer{}? [y] quit  [any other key] back",
+                    if n == 1 { "" } else { "s" }
+                );
+                grid.put_str(1, y, &prompt, style);
+                return;
+            }
+            None => {}
         }
 
         let buffer = self.buffer();
@@ -134,7 +145,7 @@ mod tests {
         assert_eq!(rows[1], format!("{:30}", "    nib();"));
         assert_eq!(rows[2], format!("{:30}", "}"));
         assert_eq!(rows[3], " ".repeat(30));
-        assert_eq!(rows[4], " [scratch]  Ctrl-q: menu  1:1 ");
+        assert_eq!(rows[4], " [scratch]  Ctrl-g: menu  1:1 ");
         assert_eq!(
             cursor,
             Some(Cursor {
@@ -182,12 +193,12 @@ mod tests {
     }
 
     #[test]
-    fn rescue_menu_replaces_the_status_line() {
+    fn menu_replaces_the_status_line() {
         let mut editor = Editor::with_text("a");
         editor.resize(100, 2);
-        editor.handle_key(crate::KeyEvent::ctrl('q'));
+        editor.handle_key(crate::KeyEvent::ctrl('g'));
         let (rows, _) = render(&editor);
-        assert!(rows[1].starts_with(" [w] save all and quit"), "{}", rows[1]);
+        assert!(rows[1].starts_with(" [r] restart plugins"), "{}", rows[1]);
     }
 
     #[test]

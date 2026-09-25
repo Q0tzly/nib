@@ -16,7 +16,7 @@ pub mod view;
 
 pub use buffer::{Buffer, Change, LineEnding};
 pub use change::{Assoc, ChangeSet, Edit};
-pub use editor::Editor;
+pub use editor::{Editor, Menu};
 pub use error::Error;
 pub use grid::{Cell, Color, Cursor, CursorShape, Grid, Style, Symbol};
 pub use history::UndoMode;

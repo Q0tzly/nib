@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use std::{env, fs};
 
-use nib_core::{Editor, KeyCode, KeyEvent, PluginOptions, Range};
+use nib_core::{Editor, KeyCode, KeyEvent, Menu, PluginOptions, Range};
 
 fn plugin_dir(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -40,22 +40,29 @@ fn plugin_edits_the_buffer() {
     assert_eq!(editor.view().selection.primary(), Range::point(6));
     assert_eq!(editor.message(), None);
 
-    // Ctrl-q opens the rescue menu instead of reaching the plugin, and the
-    // key that closes the menu does not reach it either.
-    editor.handle_key(KeyEvent::ctrl('q'));
-    assert!(editor.in_rescue_menu());
+    // Ctrl-g opens the core menu instead of reaching the plugin, and the key
+    // that closes the menu does not reach it either.
+    editor.handle_key(KeyEvent::ctrl('g'));
+    assert_eq!(editor.menu(), Some(Menu::Main));
     editor.handle_key(KeyEvent::new(KeyCode::Escape));
-    assert!(!editor.in_rescue_menu());
+    assert_eq!(editor.menu(), None);
     editor.handle_key(key('!'));
     assert_eq!(editor.buffer().text().to_string(), "hi あ!");
+
+    // Pressed twice, Ctrl-g reaches the plugin.
+    editor.handle_key(KeyEvent::ctrl('g'));
+    editor.handle_key(KeyEvent::ctrl('g'));
+    assert_eq!(editor.buffer().text().to_string(), "hi あ!^G");
 
     // Escape pops the plugin's layer.
     assert_eq!(editor.key_hint(), None);
     editor.handle_key(KeyEvent::new(KeyCode::Escape));
     assert!(editor.key_hint().is_some());
 
-    editor.handle_key(KeyEvent::ctrl('q'));
+    // Unsaved changes: quitting asks first.
+    editor.handle_key(KeyEvent::ctrl('g'));
     editor.handle_key(key('q'));
+    editor.handle_key(key('y'));
     assert!(editor.should_quit());
 }
 
@@ -92,8 +99,8 @@ fn failing_plugin_is_restarted_then_disabled() {
 
     assert!(editor.key_hint().is_some());
 
-    // The rescue menu brings it back.
-    editor.handle_key(KeyEvent::ctrl('q'));
+    // The core menu brings it back.
+    editor.handle_key(KeyEvent::ctrl('g'));
     editor.handle_key(key('r'));
     assert_eq!(editor.message(), Some("plugins restarted"));
     assert!(editor.plugins()[0].enabled);

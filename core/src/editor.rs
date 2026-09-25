@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::Error;
 use crate::buffer::Buffer;
-use crate::input::{KeyCode, KeyEvent, Modifiers};
+use crate::input::{KeyCode, KeyEvent};
 use crate::plugin::{PluginId, Plugins};
 use crate::view::View;
 
@@ -18,8 +18,17 @@ pub(crate) struct State {
     pub layers: Vec<PluginId>,
     /// Shown to the user until the next key, e.g. a plugin error.
     pub message: Option<String>,
-    /// The rescue menu is open and takes the next key.
-    pub rescue: bool,
+    /// The core menu is open and takes the next key.
+    pub menu: Option<Menu>,
+}
+
+/// The core menu, opened with the reserved menu key. It is drawn and
+/// handled by the core alone, so it works however broken the plugins are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Menu {
+    Main,
+    /// Quitting would drop unsaved changes.
+    ConfirmQuit,
 }
 
 pub struct Editor {
@@ -31,8 +40,8 @@ pub struct Editor {
 
 const LENT: &str = "editor state is only lent during plugin calls";
 
-/// Reserved by the core; plugins never see it.
-const RESCUE_KEY: KeyEvent = KeyEvent::ctrl('q');
+/// Reserved by the core. Plugins see it only when pressed twice.
+const MENU_KEY: KeyEvent = KeyEvent::ctrl('g');
 
 impl Default for Editor {
     /// Starts with an empty buffer that has no path.
@@ -46,7 +55,7 @@ impl Default for Editor {
                 quit: false,
                 layers: Vec::new(),
                 message: None,
-                rescue: false,
+                menu: None,
             }),
             plugins: Plugins::default(),
         }
@@ -111,19 +120,20 @@ impl Editor {
 
     /// Sends the key down the input stack until a plugin handles it.
     ///
-    /// Ctrl-q never reaches plugins: it opens the rescue menu, so the editor
-    /// can always be left even if a plugin swallows every key.
+    /// The menu key never goes to plugins directly: it opens the core menu,
+    /// so plugins can always be managed even if one swallows every key.
     pub fn handle_key(&mut self, key: KeyEvent) {
         self.state_mut().message = None;
-        if self.state().rescue {
-            self.state_mut().rescue = false;
-            self.handle_rescue_key(key);
-            return;
+        if let Some(menu) = self.state_mut().menu.take() {
+            self.handle_menu_key(menu, key);
+        } else if key == MENU_KEY {
+            self.state_mut().menu = Some(Menu::Main);
+        } else {
+            self.send_to_plugins(key);
         }
-        if key == RESCUE_KEY {
-            self.state_mut().rescue = true;
-            return;
-        }
+    }
+
+    fn send_to_plugins(&mut self, key: KeyEvent) {
         let layers = self.state().layers.clone();
         for plugin in layers.into_iter().rev() {
             if self.plugin_handle_key(plugin, key) {
@@ -132,30 +142,45 @@ impl Editor {
         }
     }
 
-    pub fn in_rescue_menu(&self) -> bool {
-        self.state().rescue
+    pub fn menu(&self) -> Option<Menu> {
+        self.state().menu
     }
 
-    /// Shown while no plugin takes input, when the rescue menu is the only
-    /// thing that responds.
+    /// Shown while no plugin takes input, when the menu is the only thing
+    /// that responds.
     pub fn key_hint(&self) -> Option<&'static str> {
-        self.state().layers.is_empty().then_some("Ctrl-q: menu")
+        self.state().layers.is_empty().then_some("Ctrl-g: menu")
     }
 
-    fn handle_rescue_key(&mut self, key: KeyEvent) {
-        if key.modifiers != Modifiers::default() {
-            return;
-        }
-        match key.code {
-            KeyCode::Char('w') => match self.save_all() {
+    pub fn modified_buffers(&self) -> usize {
+        self.state()
+            .buffers
+            .iter()
+            .filter(|buffer| buffer.is_modified())
+            .count()
+    }
+
+    fn handle_menu_key(&mut self, menu: Menu, key: KeyEvent) {
+        let plain = |c: char| key == KeyEvent::new(KeyCode::Char(c));
+        match menu {
+            Menu::Main if key == MENU_KEY => self.send_to_plugins(key),
+            Menu::Main if plain('r') => self.restart_plugins(),
+            Menu::Main if plain('w') => match self.save_all() {
                 Ok(()) => self.state_mut().quit = true,
                 Err(failures) => {
                     self.state_mut().message =
                         Some(format!("not quitting: {}", failures.join("; ")));
                 }
             },
-            KeyCode::Char('q') => self.state_mut().quit = true,
-            KeyCode::Char('r') => self.restart_plugins(),
+            Menu::Main if plain('q') => {
+                if self.modified_buffers() == 0 {
+                    self.state_mut().quit = true;
+                } else {
+                    self.state_mut().menu = Some(Menu::ConfirmQuit);
+                }
+            }
+            Menu::ConfirmQuit if plain('y') => self.state_mut().quit = true,
+            // Any other key goes back, so a mistyped menu key is harmless.
             _ => {}
         }
     }
@@ -228,27 +253,47 @@ mod tests {
     }
 
     #[test]
-    fn rescue_menu_quits_or_goes_back() {
+    fn menu_quits_or_goes_back() {
         let mut editor = Editor::default();
-        press(&mut editor, &[KeyEvent::ctrl('q')]);
-        assert!(editor.in_rescue_menu());
+        press(&mut editor, &[KeyEvent::ctrl('g')]);
+        assert_eq!(editor.menu(), Some(Menu::Main));
         press(&mut editor, &[KeyEvent::new(KeyCode::Escape)]);
-        assert!(!editor.in_rescue_menu());
+        assert_eq!(editor.menu(), None);
         assert!(!editor.should_quit());
 
-        press(&mut editor, &[KeyEvent::ctrl('q'), char_key('q')]);
+        press(&mut editor, &[KeyEvent::ctrl('g'), char_key('q')]);
         assert!(editor.should_quit());
     }
 
     #[test]
-    fn rescue_menu_saves_before_quitting() {
-        let path = std::env::temp_dir().join(format!("nib-{}-rescue.txt", std::process::id()));
+    fn quitting_with_unsaved_changes_needs_confirmation() {
+        let mut editor = Editor::with_text("a");
+        modify(&mut editor);
+        press(&mut editor, &[KeyEvent::ctrl('g'), char_key('q')]);
+        assert_eq!(editor.menu(), Some(Menu::ConfirmQuit));
+        assert!(!editor.should_quit());
+
+        // Anything but "y" goes back, e.g. a second "q" from a typo.
+        press(&mut editor, &[char_key('q')]);
+        assert_eq!(editor.menu(), None);
+        assert!(!editor.should_quit());
+
+        press(
+            &mut editor,
+            &[KeyEvent::ctrl('g'), char_key('q'), char_key('y')],
+        );
+        assert!(editor.should_quit());
+    }
+
+    #[test]
+    fn menu_saves_before_quitting() {
+        let path = std::env::temp_dir().join(format!("nib-{}-menu.txt", std::process::id()));
         fs::write(&path, "a").unwrap();
         let mut editor = Editor::default();
         editor.open(&path).unwrap();
         modify(&mut editor);
 
-        press(&mut editor, &[KeyEvent::ctrl('q'), char_key('w')]);
+        press(&mut editor, &[KeyEvent::ctrl('g'), char_key('w')]);
         let saved = fs::read_to_string(&path).unwrap();
         fs::remove_file(&path).unwrap();
         assert!(editor.should_quit());
@@ -256,10 +301,10 @@ mod tests {
     }
 
     #[test]
-    fn rescue_menu_does_not_quit_when_saving_fails() {
+    fn menu_does_not_quit_when_saving_fails() {
         let mut editor = Editor::with_text("a");
         modify(&mut editor);
-        press(&mut editor, &[KeyEvent::ctrl('q'), char_key('w')]);
+        press(&mut editor, &[KeyEvent::ctrl('g'), char_key('w')]);
         assert!(!editor.should_quit());
         assert_eq!(
             editor.message(),

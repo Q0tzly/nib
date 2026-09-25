@@ -15,7 +15,7 @@ use crate::ui::Theme;
 ///
 /// Editing behavior (`tab_width`, `indent`, `scroll_margin`) is for plugins
 /// to read and, later, to override per buffer. Safety settings (`menu_key`,
-/// `plugins`, and the plugin limits) are for the user alone.
+/// `plugin_dirs`, and the plugin limits) are for the user alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     pub tab_width: u16,
@@ -24,7 +24,7 @@ pub struct Settings {
     pub scroll_margin: u16,
     pub menu_key: KeyEvent,
     /// Plugin directories to load besides the built-in plugins.
-    pub plugins: Vec<PathBuf>,
+    pub plugin_dirs: Vec<PathBuf>,
     /// A plugin call taking longer is stopped.
     pub plugin_timeout: Duration,
     pub plugin_init_timeout: Duration,
@@ -45,7 +45,7 @@ impl Default for Settings {
             indent: Indent::Spaces(4),
             scroll_margin: 5,
             menu_key: KeyEvent::ctrl('g'),
-            plugins: Vec::new(),
+            plugin_dirs: Vec::new(),
             plugin_timeout: Duration::from_secs(1),
             plugin_init_timeout: Duration::from_secs(5),
             plugin_memory: 256 << 20,
@@ -176,7 +176,7 @@ struct RawCore {
     indent: Option<RawIndent>,
     scroll_margin: Option<u16>,
     menu_key: Option<String>,
-    plugins: Option<Vec<PathBuf>>,
+    plugin_dirs: Option<Vec<PathBuf>>,
     plugin_timeout_ms: Option<u64>,
     plugin_init_timeout_ms: Option<u64>,
     plugin_memory_mib: Option<usize>,
@@ -224,8 +224,8 @@ impl Config {
                 .parse()
                 .map_err(|err| fail(format!("menu-key: {err}")))?;
         }
-        if let Some(plugins) = raw_core.plugins {
-            core.plugins = plugins;
+        if let Some(dirs) = raw_core.plugin_dirs {
+            core.plugin_dirs = dirs;
         }
         let timeout = |name: &str, ms: u64| {
             if ms < 10 {
@@ -291,7 +291,7 @@ mod tests {
             tab-width = 8
             indent = "tab"
             menu-key = "C-]"
-            plugins = ["~/dev/my-plugin"]
+            plugin-dirs = ["~/dev/my-plugin"]
             plugin-timeout-ms = 2000
             plugin-memory-mib = 512
 
@@ -303,7 +303,10 @@ mod tests {
         assert_eq!(config.core.tab_width, 8);
         assert_eq!(config.core.indent, Indent::Tab);
         assert_eq!(config.core.menu_key, KeyEvent::ctrl(']'));
-        assert_eq!(config.core.plugins, vec![PathBuf::from("~/dev/my-plugin")]);
+        assert_eq!(
+            config.core.plugin_dirs,
+            vec![PathBuf::from("~/dev/my-plugin")]
+        );
         assert_eq!(config.core.plugin_timeout, Duration::from_secs(2));
         assert_eq!(config.core.plugin_init_timeout, Duration::from_secs(5));
         assert_eq!(config.core.plugin_memory, 512 << 20);

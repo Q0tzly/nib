@@ -50,7 +50,7 @@ fn main() -> ExitCode {
     editor.set_plugin_cache_dir(cache_dir());
     let configured: Vec<PathBuf> = editor
         .settings()
-        .plugins
+        .plugin_dirs
         .iter()
         .map(|dir| expand_home(dir))
         .chain(plugins)

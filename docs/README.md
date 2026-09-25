@@ -8,5 +8,6 @@
 | [architecture.md](architecture.md) | コアとプラグインの境界、データモデル、描画、プロセスモデル |
 | [plugin-api.md](plugin-api.md) | WIT の設計方針、イベントとコマンドの流れ、ライフサイクル、権限 |
 | [keymap.md](keymap.md) | モーダルの扱い、キーマップをプラグインで実現するしくみ |
+| [lsp.md](lsp.md) | LSP プラグインの範囲、サーバーの設定、位置の数え方 |
 | [roadmap.md](roadmap.md) | マイルストーン |
 | adr/ | 個別の設計判断の記録（`NNNN-title.md`） |

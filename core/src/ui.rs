@@ -57,6 +57,16 @@ pub(crate) struct Popup {
     pub lines: Vec<StyledLine>,
 }
 
+/// Text a plugin put after the end of a line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Note {
+    pub owner: PluginId,
+    pub namespace: String,
+    pub at: usize,
+    pub text: String,
+    pub style: String,
+}
+
 /// A style a plugin put over part of a buffer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Decoration {
@@ -129,6 +139,16 @@ fn builtin(name: &str) -> Option<Style> {
             ..Style::default()
         }),
         "ui.popup.key" => Some(fg(3)),
+        // LSP diagnostics: the note after the line and the status counts
+        // by severity, and an underline for the range.
+        "diagnostic.error" => Some(fg(1)),
+        "diagnostic.warning" => Some(fg(3)),
+        "diagnostic.info" => Some(fg(4)),
+        "diagnostic.hint" => Some(fg(6)),
+        "diagnostic.underline" => Some(Style {
+            underline: true,
+            ..Style::default()
+        }),
         "ui.cursor.match" => Some(Style {
             bold: true,
             underline: true,

@@ -117,6 +117,11 @@ impl editor::Host for PluginData {
         let count = self.state()?.buffers.len();
         Ok((0..count as u32).map(Resource::new_own).collect())
     }
+
+    fn working_directory(&mut self) -> HostResult<String> {
+        let dir = std::env::current_dir().unwrap_or_default();
+        Ok(dir.to_string_lossy().into_owned())
+    }
 }
 
 impl editor::HostBuffer for PluginData {
@@ -719,6 +724,22 @@ impl wit_ui::Host for PluginData {
             decorations
                 .into_iter()
                 .map(|d| (offset(d.start)..offset(d.end), d.style)),
+        );
+        Ok(())
+    }
+
+    fn set_notes(
+        &mut self,
+        buffer: Resource<BufferHandle>,
+        namespace: String,
+        notes: Vec<wit_ui::Note>,
+    ) -> HostResult<()> {
+        let owner = self.plugin;
+        let offset = |o: u64| usize::try_from(o).unwrap_or(usize::MAX);
+        self.buffer(&buffer)?.set_notes(
+            owner,
+            &namespace,
+            notes.into_iter().map(|n| (offset(n.at), n.text, n.style)),
         );
         Ok(())
     }

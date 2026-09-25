@@ -424,11 +424,10 @@ impl Helix {
             Pending::Space => {
                 let command = match c {
                     'f' => "picker.files",
+                    'k' => "lsp.hover",
                     _ => return,
                 };
-                if let Err(err) = commands::call(command, "") {
-                    ui::show_message(&err);
-                }
+                call_or_show(command);
             }
             Pending::Goto => {
                 let goto: fn(&Doc, u64, Option<u64>) -> u64 = match c {
@@ -444,6 +443,10 @@ impl Helix {
                         }
                     },
                     's' => |doc, pos, _| doc::first_non_blank(doc, pos),
+                    'd' => {
+                        call_or_show("lsp.definition");
+                        return;
+                    }
                     'n' | 'p' => {
                         let command = if c == 'n' {
                             "buffer.next"
@@ -1334,6 +1337,13 @@ fn select_matches(view: &View, pattern: &str) {
 
 /// `mi` and `ma`: selects inside or around the pair of `c` around each
 /// cursor.
+/// Calls another plugin's command, showing its error if it fails.
+fn call_or_show(command: &str) {
+    if let Err(err) = commands::call(command, "") {
+        ui::show_message(&err);
+    }
+}
+
 /// Highlights the bracket that pairs with the one at the primary cursor.
 /// Only the syntax tree is asked: searching the text for a bracket without
 /// a pair would scan to the end of the file on every key.

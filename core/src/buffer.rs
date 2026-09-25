@@ -14,7 +14,7 @@ use crate::plugin::PluginId;
 use crate::search;
 use crate::selection::{Range, Selection};
 use crate::syntax::BufferSyntax;
-use crate::ui::Decoration;
+use crate::ui::{Decoration, Note};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LineEnding {
@@ -43,6 +43,8 @@ pub struct Buffer {
     pub(crate) syntax: Option<BufferSyntax>,
     /// Sorted by start, so drawing can skip to the visible ones.
     pub(crate) decorations: Vec<Decoration>,
+    /// Sorted by position.
+    pub(crate) notes: Vec<Note>,
     /// Changes not yet turned into events: the version after each, and
     /// what it did.
     pub(crate) change_log: Vec<(u64, Vec<TextChange>)>,
@@ -75,6 +77,7 @@ impl Buffer {
             saved_state: 0,
             syntax: None,
             decorations: Vec::new(),
+            notes: Vec::new(),
             change_log: Vec::new(),
         }
     }
@@ -332,11 +335,38 @@ impl Buffer {
 
     pub(crate) fn remove_decorations(&mut self, owner: PluginId) {
         self.decorations.retain(|d| d.owner != owner);
+        self.notes.retain(|n| n.owner != owner);
+    }
+
+    /// Replaces the notes `owner` has in `namespace`.
+    pub(crate) fn set_notes(
+        &mut self,
+        owner: PluginId,
+        namespace: &str,
+        notes: impl IntoIterator<Item = (usize, String, String)>,
+    ) {
+        self.notes
+            .retain(|n| !(n.owner == owner && n.namespace == namespace));
+        let len = self.len();
+        self.notes
+            .extend(notes.into_iter().map(|(at, text, style)| Note {
+                owner,
+                namespace: namespace.to_string(),
+                at: at.min(len),
+                text,
+                style,
+            }));
+        self.notes.sort_by_key(|n| n.at);
     }
 
     /// Moves decorations with the text. Text inserted at either end stays
     /// outside, and decorations whose text is gone are dropped.
     fn map_decorations(&mut self, changes: &[ChangeSet]) {
+        for note in &mut self.notes {
+            for change in changes {
+                note.at = change.map_pos(note.at, Assoc::Before);
+            }
+        }
         if self.decorations.is_empty() {
             return;
         }
@@ -616,5 +646,19 @@ mod tests {
         assert_eq!(decorated(&buffer), [(1, 2), (2, 3), (3, 4), (5, 6)]);
         buffer.remove_decorations(1);
         assert_eq!(decorated(&buffer), [(2, 3)]);
+    }
+
+    #[test]
+    fn notes_move_with_edits_and_stay() {
+        let mut buffer = Buffer::with_text("one two");
+        buffer.set_notes(1, "n", [(4, "x".into(), String::new())]);
+        insert(&mut buffer, 0, "ab", UndoMode::NewStep);
+        assert_eq!(buffer.notes[0].at, 6);
+        let sel = Selection::point(0);
+        let edits = vec![Edit::delete(2, 9)];
+        buffer
+            .apply(buffer.version(), edits, &sel, None, UndoMode::NewStep)
+            .unwrap();
+        assert_eq!(buffer.notes[0].at, 2);
     }
 }

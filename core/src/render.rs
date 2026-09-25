@@ -175,7 +175,8 @@ impl Editor {
             }
             let line: Cow<str> = text.line(line_idx).into();
             let line = line.strip_suffix('\n').unwrap_or(&line);
-            let mut offset = text.line_to_byte(line_idx);
+            let line_start = text.line_to_byte(line_idx);
+            let mut offset = line_start;
             // Display column within the line; the screen shows `left..left + width`.
             let mut column = 0u32;
             for grapheme in line.graphemes(true) {
@@ -215,6 +216,20 @@ impl Editor {
                 }
                 if offset < text.len_bytes() && selected(offset) {
                     grid.put_grapheme(x, row, " ", style_at(offset));
+                }
+            }
+            // Notes follow the text, when all of the line is drawn.
+            if offset == line_start + line.len() {
+                let notes = &self.buffer().notes;
+                let first = notes.partition_point(|note| note.at < line_start);
+                let mut x = (column + 2).saturating_sub(left);
+                for note in notes[first..].iter().take_while(|note| note.at <= offset) {
+                    if x >= width {
+                        break;
+                    }
+                    let style = self.state().theme.style(&note.style).unwrap_or(normal);
+                    let text = note.text.lines().next().unwrap_or_default();
+                    x = u32::from(grid.put_str(x as u16, row, text, style)) + 2;
                 }
             }
         }
@@ -727,5 +742,25 @@ mod tests {
         editor.view_mut().top_line = 4;
         let (rows, _) = render(&editor);
         assert!(!rows.concat().contains('x'));
+    }
+
+    #[test]
+    fn notes_follow_their_line() {
+        let mut editor = Editor::with_text("ab\ncd\n");
+        editor.resize(12, 4);
+        let state = editor.state_mut();
+        let buffer = state.view.buffer;
+        state.buffers[buffer].set_notes(
+            1,
+            "x",
+            [
+                (4, "two".to_string(), String::new()),
+                (0, "one".to_string(), String::new()),
+                (1, "more text".to_string(), String::new()),
+            ],
+        );
+        let (rows, _) = render(&editor);
+        assert_eq!(rows[0], "ab  one  mor");
+        assert_eq!(rows[1], "cd  two     ");
     }
 }

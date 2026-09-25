@@ -288,6 +288,7 @@ interface timers {
 | `panel.set-cursor(option<(line, byte)>)` | パネル内のカーソル。設定している間は、バッファのカーソルの代わりにここへカーソルを出す。コマンドラインの入力位置に使う |
 | `ui.popup(anchor, lines)` | 本文の上に重ねるポップアップ。パネルと同じくリソースで、`update` で中身を差し替え、捨てると閉じる |
 | `ui.set-decorations(buffer, namespace, decorations)` | バッファの範囲にスタイルを付ける |
+| `ui.set-notes(buffer, namespace, notes)` | バッファの位置の行末に、文字列を出す（M3.4） |
 
 中身はすべて `styled-line` で渡し、配置と切り詰めはコアが行う。
 
@@ -314,6 +315,7 @@ set-decorations: func(buf: borrow<buffer>, namespace: string, decorations: list<
 
 - 装飾の位置は、付けたあとの編集に合わせてコアが動かす（[architecture.md](architecture.md) の「装飾」）。プラグインが編集のたびに付け直す必要はない。
 - 装飾の範囲はバッファの長さに切り詰め、空の範囲は捨てる。
+- 注記（`record note { at: offset, text: string, style: string }`）も、装飾と同じく名前空間ごとに差し替え、位置は編集に合わせて動く。`at` の行の末尾に描く。まわりのテキストが消えても取り除かず、消えた場所へ動く（LSP の診断のように、編集のたびに付け直されるものに使う想定）。
 - ポップアップの位置は編集に合わせて動かない。位置を変えたいときは作り直す。
 
 ## 権限

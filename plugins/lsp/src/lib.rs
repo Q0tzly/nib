@@ -1,0 +1,698 @@
+//! Language Server Protocol client (docs/lsp.md). It starts a server for a
+//! language when a file of it is opened, keeps the server's copy of each
+//! file in sync, and shows diagnostics, hovers, and definitions. Servers
+//! answer through process events, so nothing here waits for them.
+
+mod position;
+mod rpc;
+
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+
+use nib_plugin::exports::nib::plugin::guest::{Guest, KeyResult};
+use nib_plugin::nib::plugin::editor::{self, Buffer};
+use nib_plugin::nib::plugin::events::{BufferChange, Event};
+use nib_plugin::nib::plugin::process::{self, Child, Stream};
+use nib_plugin::nib::plugin::types::{KeyEvent, SelRange, Selection, Span};
+use nib_plugin::nib::plugin::ui::{self, Decoration, Note, Popup, PopupAnchor, Side};
+use nib_plugin::nib::plugin::{commands, input, syntax};
+use serde_json::{Value, json};
+
+/// Servers used unless `[settings.servers]` says otherwise.
+const DEFAULT_SERVERS: [(&str, &[&str]); 3] = [
+    ("rust", &["rust-analyzer"]),
+    ("go", &["gopls"]),
+    ("python", &["pyright-langserver", "--stdio"]),
+];
+
+const SEVERITIES: [&str; 4] = ["error", "warning", "info", "hint"];
+
+/// Longest hover shown, in lines and in chars per line.
+const HOVER_LINES: usize = 20;
+const HOVER_WIDTH: usize = 100;
+/// How much of a server's error output is kept, to say why it stopped.
+const STDERR_KEPT: usize = 4096;
+
+struct Server {
+    language: String,
+    child: Child,
+    /// Output not yet split into messages.
+    output: Vec<u8>,
+    /// The end of its error output.
+    stderr: Vec<u8>,
+    next_id: u64,
+    pending: HashMap<u64, Request>,
+    /// Initialized, so documents can be opened.
+    ready: bool,
+    /// Positions count bytes, as the core's do.
+    utf8: bool,
+    /// Takes changes as edits rather than whole texts.
+    incremental: bool,
+    /// Documents open on the server, by URI.
+    opened: HashSet<String>,
+    /// Documents to open once it is initialized.
+    waiting: Vec<String>,
+}
+
+enum Request {
+    Initialize,
+    Hover { uri: String, offset: u64 },
+    Definition,
+}
+
+struct Lsp {
+    /// The command for each language.
+    commands: HashMap<String, Vec<String>>,
+    servers: Vec<Server>,
+    /// Languages whose server could not start or stopped; not tried again.
+    failed: HashSet<String>,
+    cwd: String,
+    /// Diagnostics per severity, by URI, for the status line.
+    counts: HashMap<String, [usize; 4]>,
+    /// Closed by the next key, which it takes with its own input layer.
+    hover: Option<Popup>,
+}
+
+thread_local! {
+    static LSP: RefCell<Option<Lsp>> = const { RefCell::new(None) };
+}
+
+fn with_lsp<R>(f: impl FnOnce(&mut Lsp) -> R) -> R {
+    LSP.with_borrow_mut(|lsp| f(lsp.as_mut().expect("initialized in init")))
+}
+
+struct Plugin;
+
+impl Guest for Plugin {
+    fn init(config: String) -> Result<(), String> {
+        let config: Value = serde_json::from_str(&config).map_err(|err| err.to_string())?;
+        let mut servers: HashMap<String, Vec<String>> = DEFAULT_SERVERS
+            .iter()
+            .map(|(language, command)| {
+                let command = command.iter().map(|s| s.to_string()).collect();
+                (language.to_string(), command)
+            })
+            .collect();
+        if let Some(configured) = config["servers"].as_object() {
+            for (language, server) in configured {
+                let command = match &server["command"] {
+                    Value::String(line) => line.split_whitespace().map(String::from).collect(),
+                    Value::Array(words) => words
+                        .iter()
+                        .map(|w| w.as_str().map(String::from))
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or_else(|| format!("servers.{language}.command: strings only"))?,
+                    _ => return Err(format!("servers.{language} needs a command")),
+                };
+                servers.insert(language.clone(), command);
+            }
+        }
+        commands::register(
+            "hover",
+            "Show what the language server says about the cursor",
+        );
+        commands::register("definition", "Go to the definition at the cursor");
+        LSP.with_borrow_mut(|lsp| {
+            *lsp = Some(Lsp {
+                commands: servers,
+                servers: Vec::new(),
+                failed: HashSet::new(),
+                cwd: editor::working_directory(),
+                counts: HashMap::new(),
+                hover: None,
+            })
+        });
+        Ok(())
+    }
+
+    fn handle_key(_ev: KeyEvent) -> KeyResult {
+        with_lsp(|lsp| {
+            if lsp.hover.take().is_some() {
+                input::pop_layer();
+            }
+        });
+        // The key still does what it would have done.
+        KeyResult::Pass
+    }
+
+    fn run_command(name: String, _args: String) -> Result<String, String> {
+        with_lsp(|lsp| match name.as_str() {
+            "hover" => lsp.ask_at_cursor("textDocument/hover", true),
+            "definition" => lsp.ask_at_cursor("textDocument/definition", false),
+            _ => Err(format!("no command {name}")),
+        })
+        .map(|()| "null".into())
+    }
+
+    fn on_event(ev: Event) {
+        with_lsp(|lsp| match ev {
+            Event::BufferOpened(buffer) => lsp.opened(&buffer),
+            Event::BufferChanged(change) => lsp.changed(&change),
+            Event::BufferSaved(buffer) => lsp.saved(&buffer),
+            Event::ProcessOutput(output) => {
+                let Some(i) = lsp.server_of(output.process) else {
+                    return;
+                };
+                let server = &mut lsp.servers[i];
+                if output.stream == Stream::Stderr {
+                    server.stderr.extend(output.data);
+                    let excess = server.stderr.len().saturating_sub(STDERR_KEPT);
+                    server.stderr.drain(..excess);
+                    return;
+                }
+                server.output.extend(output.data);
+                for message in rpc::decode(&mut lsp.servers[i].output) {
+                    lsp.receive(i, message);
+                }
+            }
+            Event::ProcessExit(exit) => {
+                let Some(i) = lsp.server_of(exit.process) else {
+                    return;
+                };
+                let server = lsp.servers.remove(i);
+                let stderr = String::from_utf8_lossy(&server.stderr);
+                let reason = stderr.lines().find(|line| !line.trim().is_empty());
+                let command = lsp.commands[&server.language].join(" ");
+                ui::show_message(&match reason {
+                    Some(reason) => format!("lsp: {command} stopped: {}", reason.trim()),
+                    None => format!("lsp: {command} stopped"),
+                });
+                lsp.failed.insert(server.language);
+            }
+            Event::Custom(_) | Event::Timer(_) => {}
+        })
+    }
+}
+
+impl Lsp {
+    fn server_of(&self, process: u64) -> Option<usize> {
+        self.servers.iter().position(|s| s.child.id() == process)
+    }
+
+    /// The running server for `buffer`'s language, started if need be.
+    fn server_for(&mut self, buffer: &Buffer) -> Option<usize> {
+        let language = syntax::language(buffer)?;
+        if let Some(i) = self.servers.iter().position(|s| s.language == language) {
+            return Some(i);
+        }
+        if self.failed.contains(&language) {
+            return None;
+        }
+        let (program, args) = self.commands.get(&language)?.split_first()?;
+        let child = match process::spawn(program, args, None) {
+            Ok(child) => child,
+            Err(err) => {
+                ui::show_message(&format!("lsp: {err}"));
+                self.failed.insert(language);
+                return None;
+            }
+        };
+        self.servers.push(Server {
+            language,
+            child,
+            output: Vec::new(),
+            stderr: Vec::new(),
+            next_id: 0,
+            pending: HashMap::new(),
+            ready: false,
+            utf8: false,
+            incremental: false,
+            opened: HashSet::new(),
+            waiting: Vec::new(),
+        });
+        let i = self.servers.len() - 1;
+        let root = path_to_uri(&self.cwd);
+        let name = self.cwd.rsplit(['/', '\\']).next().unwrap_or("root");
+        let params = json!({
+            "processId": null,
+            "clientInfo": {"name": "nib"},
+            "rootUri": root,
+            "rootPath": self.cwd,
+            "workspaceFolders": [{"uri": root, "name": name}],
+            "capabilities": {
+                "general": {"positionEncodings": ["utf-8", "utf-16"]},
+                "textDocument": {
+                    "synchronization": {"didSave": true},
+                    "hover": {"contentFormat": ["plaintext", "markdown"]},
+                    "definition": {"linkSupport": true},
+                    "publishDiagnostics": {},
+                },
+                "workspace": {"workspaceFolders": true, "configuration": true},
+                "window": {"workDoneProgress": false},
+            },
+        });
+        self.servers[i].request("initialize", params, Request::Initialize);
+        Some(i)
+    }
+
+    fn opened(&mut self, buffer: &Buffer) {
+        let Some(uri) = self.uri(buffer) else {
+            return;
+        };
+        let Some(i) = self.server_for(buffer) else {
+            return;
+        };
+        let server = &mut self.servers[i];
+        if server.ready {
+            server.open(&uri, buffer);
+        } else if !server.waiting.contains(&uri) {
+            server.waiting.push(uri);
+        }
+    }
+
+    fn changed(&mut self, change: &BufferChange) {
+        let buffer = &change.buffer;
+        let Some((i, uri)) = self.open_document(buffer) else {
+            return;
+        };
+        let server = &mut self.servers[i];
+        let changes: Vec<Value> = if server.utf8 && server.incremental {
+            change
+                .changes
+                .iter()
+                .map(|c| {
+                    json!({
+                        "range": {
+                            "start": {"line": c.start_line, "character": c.start_column},
+                            "end": {"line": c.end_line, "character": c.end_column},
+                        },
+                        "text": c.text,
+                    })
+                })
+                .collect()
+        } else {
+            // Positions in UTF-16 need the text before the change, which is
+            // gone, so send all of it.
+            vec![json!({"text": buffer.slice(0, buffer.len()).unwrap_or_default()})]
+        };
+        let params = json!({
+            "textDocument": {"uri": uri, "version": change.version},
+            "contentChanges": changes,
+        });
+        server.notify("textDocument/didChange", params);
+    }
+
+    fn saved(&mut self, buffer: &Buffer) {
+        if let Some((i, uri)) = self.open_document(buffer) {
+            let params = json!({"textDocument": {"uri": uri}});
+            self.servers[i].notify("textDocument/didSave", params);
+        }
+    }
+
+    /// The server `buffer` is open on, and its URI.
+    fn open_document(&self, buffer: &Buffer) -> Option<(usize, String)> {
+        let uri = self.uri(buffer)?;
+        let i = self.servers.iter().position(|s| s.opened.contains(&uri))?;
+        Some((i, uri))
+    }
+
+    /// Sends a hover or definition request for the primary cursor.
+    fn ask_at_cursor(&mut self, method: &str, hover: bool) -> Result<(), String> {
+        let view = editor::active_view();
+        let buffer = view.buffer();
+        let (i, uri) = self
+            .open_document(&buffer)
+            .ok_or("no language server for this file")?;
+        let selection = view.selection();
+        let range = selection.ranges[selection.primary as usize];
+        let offset = if range.head > range.anchor {
+            buffer.prev_grapheme(range.head).unwrap_or(range.head)
+        } else {
+            range.head
+        };
+        let server = &mut self.servers[i];
+        let (line, character) = position::to_lsp(&buffer, offset, server.utf8);
+        let params = json!({
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": character},
+        });
+        let request = if hover {
+            Request::Hover { uri, offset }
+        } else {
+            Request::Definition
+        };
+        server.request(method, params, request);
+        Ok(())
+    }
+
+    fn receive(&mut self, i: usize, message: Value) {
+        let method = message["method"].as_str();
+        let id = message.get("id").cloned();
+        match (method, id) {
+            // A request from the server: answer it, or it may wait for us.
+            (Some(method), Some(id)) => {
+                let result = match method {
+                    "workspace/configuration" => {
+                        let items = message["params"]["items"].as_array().map_or(0, Vec::len);
+                        Value::Array(vec![Value::Null; items])
+                    }
+                    _ => Value::Null,
+                };
+                self.servers[i].send(&json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            (Some(method), None) => self.notification(i, method, &message["params"]),
+            (None, Some(id)) => {
+                let Some(request) = id
+                    .as_u64()
+                    .and_then(|id| self.servers[i].pending.remove(&id))
+                else {
+                    return;
+                };
+                if let Some(error) = message["error"]["message"].as_str() {
+                    ui::show_message(&format!("lsp: {error}"));
+                    return;
+                }
+                self.response(i, request, &message["result"]);
+            }
+            (None, None) => {}
+        }
+    }
+
+    fn notification(&mut self, i: usize, method: &str, params: &Value) {
+        match method {
+            "textDocument/publishDiagnostics" => self.diagnostics(i, params),
+            // Errors and warnings only; the rest is chatter.
+            "window/showMessage" if params["type"].as_u64().is_some_and(|t| t <= 2) => {
+                let text = params["message"].as_str().unwrap_or_default();
+                let language = &self.servers[i].language;
+                ui::show_message(&format!("{language}: {}", first_line(text)));
+            }
+            _ => {}
+        }
+    }
+
+    fn response(&mut self, i: usize, request: Request, result: &Value) {
+        match request {
+            Request::Initialize => {
+                let capabilities = &result["capabilities"];
+                let server = &mut self.servers[i];
+                server.utf8 = capabilities["positionEncoding"] == "utf-8";
+                let sync = &capabilities["textDocumentSync"];
+                let kind = sync.as_u64().or_else(|| sync["change"].as_u64());
+                server.incremental = kind == Some(2);
+                server.ready = true;
+                server.notify("initialized", json!({}));
+                let waiting = std::mem::take(&mut server.waiting);
+                for uri in waiting {
+                    if let Some(buffer) = self.buffer(&uri) {
+                        self.servers[i].open(&uri, &buffer);
+                    }
+                }
+            }
+            Request::Hover { uri, offset } => self.show_hover(&uri, offset, result),
+            Request::Definition => self.go_to_definition(i, result),
+        }
+    }
+
+    fn diagnostics(&mut self, i: usize, params: &Value) {
+        let Some(uri) = params["uri"].as_str() else {
+            return;
+        };
+        let utf8 = self.servers[i].utf8;
+        let mut counts = [0; 4];
+        let mut decorations = Vec::new();
+        let mut notes = Vec::new();
+        let buffer = self.buffer(uri);
+        for diagnostic in params["diagnostics"].as_array().into_iter().flatten() {
+            let severity = diagnostic["severity"]
+                .as_u64()
+                .map_or(0, |s| (s.clamp(1, 4) - 1) as usize);
+            counts[severity] += 1;
+            let Some(buffer) = &buffer else {
+                continue;
+            };
+            let at = |end: &str| {
+                let position = &diagnostic["range"][end];
+                let line = position["line"].as_u64().unwrap_or(0) as u32;
+                let character = position["character"].as_u64().unwrap_or(0) as u32;
+                position::from_lsp(buffer, line, character, utf8)
+            };
+            let start = at("start");
+            // An empty range still marks the char it is at.
+            let end = at("end").max(buffer.next_grapheme(start).unwrap_or(start));
+            let name = SEVERITIES[severity];
+            decorations.push(Decoration {
+                start,
+                end,
+                style: format!("diagnostic.underline.{name}"),
+            });
+            let message = diagnostic["message"].as_str().unwrap_or_default();
+            notes.push(Note {
+                at: start,
+                text: first_line(message).to_string(),
+                style: format!("diagnostic.{name}"),
+            });
+        }
+        if let Some(buffer) = &buffer {
+            ui::set_decorations(buffer, "lsp", &decorations);
+            ui::set_notes(buffer, "lsp", &notes);
+        }
+        self.counts.insert(uri.to_string(), counts);
+        self.show_counts();
+    }
+
+    /// Errors and warnings in every file, in the status line.
+    fn show_counts(&self) {
+        let mut total = [0; 4];
+        for counts in self.counts.values() {
+            for (sum, n) in total.iter_mut().zip(counts) {
+                *sum += n;
+            }
+        }
+        let mut spans = Vec::new();
+        for (severity, letter) in [(0, "E"), (1, "W")] {
+            if total[severity] > 0 {
+                let style = format!("diagnostic.{}", SEVERITIES[severity]);
+                spans.push(span(&format!("{letter}{} ", total[severity]), &style));
+            }
+        }
+        if spans.is_empty() {
+            ui::remove_status("diagnostics");
+        } else {
+            ui::set_status("diagnostics", Side::Right, 10, &spans);
+        }
+    }
+
+    fn show_hover(&mut self, uri: &str, offset: u64, result: &Value) {
+        let lines = hover_lines(&result["contents"]);
+        if lines.is_empty() {
+            ui::show_message("no hover information");
+            return;
+        }
+        // The cursor may have left the file meanwhile.
+        if self.uri(&editor::active_view().buffer()).as_deref() != Some(uri) {
+            return;
+        }
+        let lines: Vec<Vec<Span>> = lines.iter().map(|line| vec![span(line, "")]).collect();
+        let popup = Popup::new(PopupAnchor::Position(offset), &lines);
+        if self.hover.replace(popup).is_none() {
+            input::push_layer();
+        }
+    }
+
+    fn go_to_definition(&mut self, i: usize, result: &Value) {
+        // A location, a list of them, or a list of links.
+        let first = match result {
+            Value::Array(items) => items.first().cloned().unwrap_or(Value::Null),
+            other => other.clone(),
+        };
+        let (uri, position) = if first["targetUri"].is_string() {
+            (&first["targetUri"], &first["targetSelectionRange"]["start"])
+        } else {
+            (&first["uri"], &first["range"]["start"])
+        };
+        let Some(uri) = uri.as_str() else {
+            ui::show_message("no definition found");
+            return;
+        };
+        let utf8 = self.servers[i].utf8;
+        if self.uri(&editor::active_view().buffer()).as_deref() != Some(uri) {
+            let path = uri_to_path(uri, &self.cwd);
+            let args = json!({"path": path}).to_string();
+            if let Err(err) = commands::call("buffer.open", &args) {
+                ui::show_message(&err);
+                return;
+            }
+        }
+        let view = editor::active_view();
+        let buffer = view.buffer();
+        let line = position["line"].as_u64().unwrap_or(0) as u32;
+        let character = position["character"].as_u64().unwrap_or(0) as u32;
+        let at = position::from_lsp(&buffer, line, character, utf8);
+        let head = buffer.next_grapheme(at).unwrap_or(at);
+        let _ = view.set_selection(&Selection {
+            ranges: vec![SelRange { anchor: at, head }],
+            primary: 0,
+        });
+    }
+
+    fn uri(&self, buffer: &Buffer) -> Option<String> {
+        let path = buffer.path()?;
+        let absolute = if is_absolute(&path) {
+            path
+        } else {
+            let relative = path.strip_prefix("./").unwrap_or(&path);
+            format!("{}/{relative}", self.cwd)
+        };
+        Some(path_to_uri(&absolute))
+    }
+
+    /// The open buffer with URI `uri`.
+    fn buffer(&self, uri: &str) -> Option<Buffer> {
+        editor::buffers()
+            .into_iter()
+            .find(|buffer| self.uri(buffer).as_deref() == Some(uri))
+    }
+}
+
+impl Server {
+    fn send(&self, message: &Value) {
+        // A server that stopped reading ends soon; its exit is reported.
+        let _ = self.child.write(&rpc::encode(message));
+    }
+
+    fn request(&mut self, method: &str, params: Value, request: Request) {
+        self.next_id += 1;
+        self.pending.insert(self.next_id, request);
+        let message =
+            json!({"jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params});
+        self.send(&message);
+    }
+
+    fn notify(&self, method: &str, params: Value) {
+        self.send(&json!({"jsonrpc": "2.0", "method": method, "params": params}));
+    }
+
+    fn open(&mut self, uri: &str, buffer: &Buffer) {
+        let params = json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": self.language,
+                "version": buffer.version(),
+                "text": buffer.slice(0, buffer.len()).unwrap_or_default(),
+            },
+        });
+        self.notify("textDocument/didOpen", params);
+        self.opened.insert(uri.to_string());
+    }
+}
+
+/// A hover's contents as lines of plain text: a string, a markup or marked
+/// string, or a list of them. Code fences are dropped.
+fn hover_lines(contents: &Value) -> Vec<String> {
+    let text = match contents {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| item.as_str().or_else(|| item["value"].as_str()))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        other => other["value"].as_str().unwrap_or_default().to_string(),
+    };
+    let mut lines: Vec<String> = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("```"))
+        .map(|line| line.chars().take(HOVER_WIDTH).collect())
+        .take(HOVER_LINES)
+        .collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    lines
+}
+
+fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or_default()
+}
+
+fn is_absolute(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    path.starts_with('/')
+        || path.starts_with('\\')
+        || (bytes.len() > 2 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/'))
+}
+
+/// A `file:` URI, with the path's special chars escaped.
+fn path_to_uri(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    let mut uri = String::from("file://");
+    if !path.starts_with('/') {
+        // A Windows drive, as in file:///C:/...
+        uri.push('/');
+    }
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~/:".contains(&byte) {
+            uri.push(byte as char);
+        } else {
+            uri.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    uri
+}
+
+/// The path of a `file:` URI, relative to `cwd` when it is inside it, as
+/// files are usually opened.
+fn uri_to_path(uri: &str, cwd: &str) -> String {
+    let encoded = uri.strip_prefix("file://").unwrap_or(uri);
+    let mut bytes = Vec::with_capacity(encoded.len());
+    let mut rest = encoded.as_bytes();
+    while let Some((&byte, tail)) = rest.split_first() {
+        let decoded = (byte == b'%')
+            .then(|| std::str::from_utf8(tail.get(..2)?).ok())
+            .flatten()
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match decoded {
+            Some(value) => {
+                bytes.push(value);
+                rest = &tail[2..];
+            }
+            None => {
+                bytes.push(byte);
+                rest = tail;
+            }
+        }
+    }
+    let mut path = String::from_utf8_lossy(&bytes).into_owned();
+    // "/C:/..." on Windows.
+    if path.as_bytes().get(2) == Some(&b':') {
+        path.remove(0);
+    }
+    let cwd = cwd.replace('\\', "/");
+    match path.strip_prefix(&format!("{cwd}/")) {
+        Some(relative) => relative.to_string(),
+        None => path,
+    }
+}
+
+fn span(text: &str, style: &str) -> Span {
+    Span {
+        text: text.into(),
+        style: style.into(),
+    }
+}
+
+nib_plugin::export!(Plugin);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uris_round_trip() {
+        let uri = path_to_uri("/home/me/a b/c#.rs");
+        assert_eq!(uri, "file:///home/me/a%20b/c%23.rs");
+        assert_eq!(uri_to_path(&uri, "/home/me"), "a b/c#.rs");
+        assert_eq!(uri_to_path(&uri, "/elsewhere"), "/home/me/a b/c#.rs");
+        let windows = path_to_uri("C:\\work\\x.rs");
+        assert_eq!(windows, "file:///C:/work/x.rs");
+        assert_eq!(uri_to_path(&windows, "C:\\work"), "x.rs");
+    }
+
+    #[test]
+    fn hovers_become_lines() {
+        let markup = json!({"kind": "markdown", "value": "```rust\nfn f()\n```\ndoes it\n\n"});
+        assert_eq!(hover_lines(&markup), ["fn f()", "does it"]);
+        let list = json!(["one", {"language": "rust", "value": "two"}]);
+        assert_eq!(hover_lines(&list), ["one", "", "two"]);
+    }
+}

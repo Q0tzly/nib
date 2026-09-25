@@ -119,6 +119,9 @@ interface editor {
     active-view: func() -> view;
     /// Every open buffer, e.g. for a plugin enabled after files were opened.
     buffers: func() -> list<buffer>;
+    /// The editor's working directory, as an absolute path. Buffer paths
+    /// are as they were opened, so they may be relative to it.
+    working-directory: func() -> string;
 }
 
 interface input {
@@ -285,6 +288,15 @@ interface ui {
     /// list removes them. The core moves them with later edits, and drops
     /// ones whose text is deleted. Ranges are cut to the buffer.
     set-decorations: func(buf: borrow<buffer>, namespace: string, decorations: list<decoration>);
+
+    /// Text shown after the end of the line of `at`, such as a diagnostic's
+    /// message.
+    record note { at: offset, text: string, style: string }
+
+    /// Replaces this plugin's notes in `namespace` on `buf`, as with
+    /// decorations. Notes move with edits and stay when the text around
+    /// them is deleted.
+    set-notes: func(buf: borrow<buffer>, namespace: string, notes: list<note>);
 }
 
 interface settings {

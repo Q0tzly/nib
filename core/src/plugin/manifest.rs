@@ -13,6 +13,19 @@ pub(crate) struct Manifest {
     pub version: String,
     /// The `nib:plugin` version the plugin was built against.
     pub api: String,
+    #[serde(default)]
+    pub languages: Vec<LanguageManifest>,
+}
+
+/// A language the plugin provides: a tree-sitter grammar as WebAssembly and
+/// its queries, as files in the plugin.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct LanguageManifest {
+    pub name: String,
+    pub file_types: Vec<String>,
+    pub grammar: String,
+    pub highlights: Option<String>,
 }
 
 pub(crate) fn read(path: &Path) -> Result<Manifest, Error> {

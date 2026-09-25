@@ -75,16 +75,34 @@ pub struct PluginInfo {
     pub last_error: Option<String>,
     /// Loaded from a directory, so it can be reloaded from disk.
     pub reloadable: bool,
+    /// Has code to run; otherwise it only provides data, such as languages.
+    pub has_code: bool,
 }
 
 /// Where a plugin's manifest and code come from.
 enum Source<'a> {
     Dir(&'a Path),
-    /// Built into the editor.
+    /// Built into the editor: the manifest and the other files by path.
     Bytes {
         manifest: &'a str,
-        wasm: &'a [u8],
+        files: &'a [(&'a str, &'a [u8])],
     },
+}
+
+impl Source<'_> {
+    fn read(&self, path: &str) -> Result<Option<Vec<u8>>, String> {
+        match self {
+            Source::Dir(dir) => match std::fs::read(dir.join(path)) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(err) => Err(format!("{path}: {err}")),
+            },
+            Source::Bytes { files, .. } => Ok(files
+                .iter()
+                .find(|(name, _)| *name == path)
+                .map(|(_, bytes)| bytes.to_vec())),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -157,7 +175,8 @@ struct Plugin {
     version: String,
     /// `None` for plugins built into the editor.
     dir: Option<PathBuf>,
-    component: Component,
+    /// `None` for plugins that only provide data, such as languages.
+    component: Option<Component>,
     config: String,
     instance: Option<Instance>,
     enabled: bool,
@@ -217,6 +236,7 @@ impl Editor {
     /// Where compiled plugins are cached. Takes effect for plugins loaded
     /// afterwards.
     pub fn set_plugin_cache_dir(&mut self, dir: Option<PathBuf>) {
+        self.state_mut().languages.cache_dir = dir.clone();
         self.plugins.options.cache_dir = dir;
     }
 
@@ -226,9 +246,14 @@ impl Editor {
         self.add_plugin(Source::Dir(dir))
     }
 
-    /// Loads a plugin built into the editor.
-    pub fn load_builtin_plugin(&mut self, manifest: &str, wasm: &[u8]) -> Result<(), Error> {
-        self.add_plugin(Source::Bytes { manifest, wasm })
+    /// Loads a plugin built into the editor from its manifest and its other
+    /// files by path, such as `plugin.wasm`.
+    pub fn load_builtin_plugin(
+        &mut self,
+        manifest: &str,
+        files: &[(&str, &[u8])],
+    ) -> Result<(), Error> {
+        self.add_plugin(Source::Bytes { manifest, files })
     }
 
     fn add_plugin(&mut self, source: Source) -> Result<(), Error> {
@@ -236,6 +261,8 @@ impl Editor {
         if self.plugins.entries.iter().any(|p| p.name == manifest.name) {
             return Err(Error::Plugin(format!("{}: already loaded", manifest.name)));
         }
+        self.add_languages(&manifest, &source)
+            .map_err(|err| Error::Plugin(format!("{}: {err}", manifest.name)))?;
         let id = self.plugins.entries.len();
         self.plugins.entries.push(Plugin {
             name: manifest.name.clone(),
@@ -260,7 +287,49 @@ impl Editor {
     }
 
     /// Reads and checks the manifest, then compiles the component.
-    fn compile(&mut self, source: &Source) -> Result<(manifest::Manifest, Component), Error> {
+    /// Registers the languages a plugin provides, and gives them to open
+    /// buffers of their file types.
+    fn add_languages(
+        &mut self,
+        manifest: &manifest::Manifest,
+        source: &Source,
+    ) -> Result<(), String> {
+        for language in &manifest.languages {
+            let grammar = source
+                .read(&language.grammar)?
+                .ok_or_else(|| format!("{} is missing", language.grammar))?;
+            let highlights = match &language.highlights {
+                Some(path) => {
+                    let bytes = source
+                        .read(path)?
+                        .ok_or_else(|| format!("{path} is missing"))?;
+                    Some(String::from_utf8(bytes).map_err(|_| format!("{path} is not UTF-8"))?)
+                }
+                None => None,
+            };
+            self.state_mut()
+                .languages
+                .add(
+                    &language.name,
+                    language.file_types.clone(),
+                    &grammar,
+                    highlights.as_deref(),
+                )
+                .map_err(|err| format!("language {}: {err}", language.name))?;
+        }
+        if !manifest.languages.is_empty() {
+            self.state_mut().attach_syntax();
+            self.state_mut().update_syntax();
+        }
+        Ok(())
+    }
+
+    /// Reads and checks the manifest, then compiles the component, if the
+    /// plugin has code.
+    fn compile(
+        &mut self,
+        source: &Source,
+    ) -> Result<(manifest::Manifest, Option<Component>), Error> {
         let manifest = match source {
             Source::Dir(dir) => manifest::read(&dir.join("plugin.toml"))?,
             Source::Bytes { manifest, .. } => manifest::parse(manifest, "built-in plugin")?,
@@ -272,6 +341,10 @@ impl Editor {
                 manifest.api
             )));
         }
+        let Some(wasm) = source.read("plugin.wasm").map_err(fail)? else {
+            // Data only, such as a language.
+            return Ok((manifest, None));
+        };
         if self.plugins.runtime.is_none() {
             let runtime = Runtime::new(&self.plugins.options).map_err(|err| {
                 Error::Plugin(format!("starting the plugin runtime failed: {err}"))
@@ -279,12 +352,8 @@ impl Editor {
             self.plugins.runtime = Some(runtime);
         }
         let engine = &self.plugins.runtime.as_ref().expect("created above").engine;
-        let component = match source {
-            Source::Dir(dir) => Component::from_file(engine, dir.join("plugin.wasm")),
-            Source::Bytes { wasm, .. } => Component::new(engine, wasm),
-        }
-        .map_err(|err| fail(format!("{err:#}")))?;
-        Ok((manifest, component))
+        let component = Component::new(engine, &wasm).map_err(|err| fail(format!("{err:#}")))?;
+        Ok((manifest, Some(component)))
     }
 
     /// Stops the plugin, forgets its failures, and starts it again.
@@ -318,6 +387,7 @@ impl Editor {
         if manifest.name != name {
             return Err(format!("its name changed to {}", manifest.name));
         }
+        self.add_languages(&manifest, &Source::Dir(&dir))?;
         let plugin = &mut self.plugins.entries[id];
         plugin.version = manifest.version;
         plugin.component = component;
@@ -352,6 +422,7 @@ impl Editor {
                 slow_calls: p.slow_calls,
                 last_error: p.last_error.clone(),
                 reloadable: p.dir.is_some(),
+                has_code: p.component.is_some(),
             })
             .collect()
     }
@@ -369,6 +440,10 @@ impl Editor {
     /// Instantiates the plugin and calls `init`. On failure the plugin is
     /// left stopped.
     fn start_plugin(&mut self, id: PluginId) -> Result<(), String> {
+        let Some(component) = self.plugins.entries[id].component.clone() else {
+            // Data only: nothing runs.
+            return Ok(());
+        };
         let runtime = self.plugins.runtime.as_ref().expect("runtime exists");
         let options = &self.plugins.options;
         let plugin = &mut self.plugins.entries[id];
@@ -386,9 +461,8 @@ impl Editor {
         let mut store = Store::new(&runtime.engine, data);
         store.limiter(|data| &mut data.limits);
         store.set_epoch_deadline(ticks(options.init_timeout));
-        let bindings =
-            bindings::Plugin::instantiate(&mut store, &plugin.component, &runtime.linker)
-                .map_err(|err| format!("{err:#}"))?;
+        let bindings = bindings::Plugin::instantiate(&mut store, &component, &runtime.linker)
+            .map_err(|err| format!("{err:#}"))?;
         plugin.instance = Some(Instance {
             store,
             bindings,

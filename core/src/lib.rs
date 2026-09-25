@@ -14,6 +14,7 @@ mod plugin;
 mod render;
 pub mod search;
 pub mod selection;
+mod syntax;
 pub mod ui;
 pub mod view;
 

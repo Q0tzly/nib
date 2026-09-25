@@ -50,6 +50,7 @@ impl Editor {
             .enumerate()
             .map(|(id, plugin)| {
                 let state = match (&plugin.last_error, plugin.enabled) {
+                    (_, true) if !plugin.has_code => "languages".to_string(),
                     (_, true) => "running".to_string(),
                     (Some(err), false) => format!("disabled: {err}"),
                     (None, false) => "disabled".to_string(),
@@ -122,7 +123,32 @@ impl Editor {
             ranges.get(i).is_some_and(|range| range.from() <= offset)
         };
         let normal = Style::default();
-        let selection = theme_style("ui.selection").unwrap_or(normal);
+        let selection_bg = theme_style("ui.selection").unwrap_or(normal).bg;
+        let visible_start = text.line_to_byte(view.top_line.min(text.len_lines() - 1));
+        let visible_end = self
+            .buffer()
+            .line_start(view.top_line + rows as usize)
+            .unwrap_or(text.len_bytes());
+        let syntax = self.state().syntax_styles(visible_start..visible_end);
+        let style_at = |offset: usize| {
+            let style = syntax
+                .as_ref()
+                .and_then(|styles| {
+                    styles
+                        .get(offset.checked_sub(visible_start)?)
+                        .copied()
+                        .flatten()
+                })
+                .unwrap_or(normal);
+            if selected(offset) {
+                Style {
+                    bg: selection_bg,
+                    ..style
+                }
+            } else {
+                style
+            }
+        };
         let cursor_pos = view.cursor(text);
         let left = view.left_col;
         let mut cursor = None;
@@ -149,7 +175,7 @@ impl Editor {
                 if offset == cursor_pos && column >= left {
                     cursor = Some(((column - left) as u16, row));
                 }
-                let style = if selected(offset) { selection } else { normal };
+                let style = style_at(offset);
                 if next > left {
                     let x = column.saturating_sub(left) as u16;
                     // Tabs and graphemes cut by the left edge show as blanks.
@@ -173,7 +199,7 @@ impl Editor {
                     cursor = Some((x, row));
                 }
                 if offset < text.len_bytes() && selected(offset) {
-                    grid.put_grapheme(x, row, " ", selection);
+                    grid.put_grapheme(x, row, " ", style_at(offset));
                 }
             }
         }

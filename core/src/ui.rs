@@ -37,6 +37,13 @@ pub(crate) struct Panel {
     pub cursor: Option<(u32, u32)>,
 }
 
+fn fg(color: u8) -> Style {
+    Style {
+        fg: Color::Indexed(color),
+        ..Style::default()
+    }
+}
+
 /// The built-in theme. Unknown names give `None`, and the caller keeps the
 /// style of the surrounding area.
 pub fn theme_style(name: &str) -> Option<Style> {
@@ -56,6 +63,20 @@ pub fn theme_style(name: &str) -> Option<Style> {
         }),
         "ui.menu.selected" => Some(Style {
             reverse: true,
+            ..Style::default()
+        }),
+        // Syntax, by tree-sitter capture name. The base colors follow the
+        // terminal's own palette.
+        "keyword" => Some(fg(5)),
+        "function" => Some(fg(4)),
+        "function.macro" => Some(fg(6)),
+        "type" | "constructor" | "attribute" | "label" => Some(fg(3)),
+        "string" => Some(fg(2)),
+        "escape" | "constant" => Some(fg(6)),
+        "variable.builtin" => Some(fg(1)),
+        "comment" => Some(Style {
+            fg: Color::Indexed(8),
+            italic: true,
             ..Style::default()
         }),
         "ui.error" => Some(Style {

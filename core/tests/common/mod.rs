@@ -12,7 +12,7 @@ pub fn plugin_dir(name: &str) -> PathBuf {
         .join("../target/plugins")
         .join(name);
     assert!(
-        dir.join("plugin.wasm").is_file(),
+        dir.join("plugin.toml").is_file(),
         "{} is missing; run `cargo xtask build-plugins` first",
         dir.display()
     );

@@ -7,6 +7,7 @@ use crate::config::{Config, Settings};
 use crate::input::{KeyCode, KeyEvent};
 use crate::layout;
 use crate::plugin::{PluginId, Plugins};
+use crate::syntax::{BufferSyntax, Languages};
 use crate::ui::{Panel, StatusItem};
 use crate::view::View;
 
@@ -32,6 +33,7 @@ pub(crate) struct State {
     /// Views of buffers not shown, so switching back restores the selection
     /// and scroll position.
     pub hidden_views: HashMap<usize, View>,
+    pub languages: Languages,
 }
 
 impl State {
@@ -54,7 +56,10 @@ impl State {
             self.switch_to(open);
             return Ok(());
         }
-        let buffer = Buffer::open(path)?;
+        let mut buffer = Buffer::open(path)?;
+        if let Some(language) = buffer.path().and_then(|p| self.languages.for_path(p)) {
+            buffer.syntax = Some(BufferSyntax::new(language));
+        }
         let scratch = &self.buffers[0];
         if self.buffers.len() == 1
             && scratch.path().is_none()
@@ -68,6 +73,46 @@ impl State {
             self.switch_to(self.buffers.len() - 1);
         }
         Ok(())
+    }
+
+    /// Gives buffers without a language the one for their file type.
+    pub fn attach_syntax(&mut self) {
+        for buffer in &mut self.buffers {
+            if buffer.syntax.is_none()
+                && let Some(language) = buffer.path().and_then(|p| self.languages.for_path(p))
+            {
+                buffer.syntax = Some(BufferSyntax::new(language));
+            }
+        }
+    }
+
+    /// Parses the shown buffer if it changed since the last parse. Hidden
+    /// buffers wait until they are shown.
+    pub fn update_syntax(&mut self) {
+        let buffer = &mut self.buffers[self.view.buffer];
+        let text = buffer.text().clone();
+        let Some(syntax) = buffer.syntax.as_mut().filter(|s| s.dirty) else {
+            return;
+        };
+        syntax.tree = self
+            .languages
+            .parse(syntax.language, &text, syntax.tree.as_ref());
+        syntax.dirty = false;
+    }
+
+    /// Highlight styles for the bytes in `range` of the shown buffer, if it
+    /// has a parsed syntax tree.
+    pub fn syntax_styles(
+        &self,
+        range: std::ops::Range<usize>,
+    ) -> Option<Vec<Option<crate::grid::Style>>> {
+        let buffer = &self.buffers[self.view.buffer];
+        let syntax = buffer.syntax.as_ref()?;
+        let tree = syntax.tree.as_ref()?;
+        Some(
+            self.languages
+                .highlight(syntax.language, tree, buffer.text(), range),
+        )
     }
 
     /// Shows buffer `index`, keeping the view of the current one for later.
@@ -221,6 +266,7 @@ impl Default for Editor {
                 panels: Vec::new(),
                 last_panel_id: 0,
                 hidden_views: HashMap::new(),
+                languages: Languages::default(),
             }),
             plugins: Plugins::default(),
             plugin_configs: BTreeMap::new(),
@@ -260,7 +306,9 @@ impl Editor {
     /// Opens `path` in the view. The initial empty buffer is replaced if it
     /// was never touched.
     pub fn open(&mut self, path: impl Into<PathBuf>) -> Result<(), Error> {
-        self.state_mut().open(path)
+        self.state_mut().open(path)?;
+        self.state_mut().update_syntax();
+        Ok(())
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {
@@ -309,6 +357,7 @@ impl Editor {
         } else {
             self.send_to_plugins(key);
         }
+        self.state_mut().update_syntax();
         self.scroll_to_cursor();
     }
 

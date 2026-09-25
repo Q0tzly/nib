@@ -10,6 +10,8 @@ Plugins are built for `wasm32-wasip2`, so install that target for the toolchain 
 rustup target add wasm32-wasip2
 ```
 
+Building the core needs [CMake](https://cmake.org/), which wasmtime's C API uses; tree-sitter loads grammars through it. `cargo xtask build-plugins` downloads grammars with `curl`.
+
 Build the plugins before building or testing the editor. `nib` embeds the standard plugins, and the core's tests run them:
 
 ```sh

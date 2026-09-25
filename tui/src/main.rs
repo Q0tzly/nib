@@ -82,9 +82,9 @@ fn load_plugins(editor: &mut Editor, dirs: &[PathBuf]) -> Result<(), nib_core::E
         .iter()
         .map(|dir| plugin_name(dir))
         .collect::<Result<Vec<_>, _>>()?;
-    for (name, manifest, wasm) in builtin::PLUGINS {
+    for (name, manifest, files) in builtin::PLUGINS {
         if !replaced.iter().any(|r| r == name) {
-            editor.load_builtin_plugin(manifest, wasm)?;
+            editor.load_builtin_plugin(manifest, files)?;
         }
     }
     for dir in dirs {

@@ -10,6 +10,7 @@ use crate::grapheme;
 use crate::history::{History, UndoMode};
 use crate::search;
 use crate::selection::{Range, Selection};
+use crate::syntax::BufferSyntax;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LineEnding {
@@ -35,6 +36,7 @@ pub struct Buffer {
     path: Option<PathBuf>,
     history: History,
     saved_state: u64,
+    pub(crate) syntax: Option<BufferSyntax>,
 }
 
 impl Default for Buffer {
@@ -62,6 +64,7 @@ impl Buffer {
             path: None,
             history: History::default(),
             saved_state: 0,
+            syntax: None,
         }
     }
 
@@ -234,6 +237,17 @@ impl Buffer {
                 selection: after,
             });
         }
+        if let (Some(syntax), Some(first), Some(last)) = (
+            &mut self.syntax,
+            changes.edits().first(),
+            changes.edits().last(),
+        ) {
+            // One edit around all changes: tree-sitter reparses a bit more,
+            // but its positions never go through intermediate texts.
+            let old_end = last.end;
+            let new_end = (old_end + text.len_bytes()).saturating_sub(self.text.len_bytes());
+            syntax.edit(&self.text, &text, first.start, old_end, new_end);
+        }
         self.text = text;
         self.version += 1;
         self.history.record(
@@ -252,12 +266,18 @@ impl Buffer {
     pub fn undo(&mut self) -> Option<Change> {
         let (changes, selection) = self.history.undo(&mut self.text)?;
         self.version += 1;
+        if let Some(syntax) = &mut self.syntax {
+            syntax.invalidate();
+        }
         Some(Change { changes, selection })
     }
 
     pub fn redo(&mut self) -> Option<Change> {
         let (changes, selection) = self.history.redo(&mut self.text)?;
         self.version += 1;
+        if let Some(syntax) = &mut self.syntax {
+            syntax.invalidate();
+        }
         Some(Change { changes, selection })
     }
 }

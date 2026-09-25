@@ -1,6 +1,8 @@
 //! UI parts that plugins put on screen: status line items and panels. The
 //! core lays them out; plugins never see screen coordinates.
 
+use std::collections::BTreeMap;
+
 use crate::grid::{Color, Style};
 use crate::plugin::PluginId;
 
@@ -44,9 +46,35 @@ fn fg(color: u8) -> Style {
     }
 }
 
-/// The built-in theme. Unknown names give `None`, and the caller keeps the
-/// style of the surrounding area.
-pub fn theme_style(name: &str) -> Option<Style> {
+/// Styles by name, such as "ui.selection" or the tree-sitter capture
+/// "function.method": the built-in theme, overridden by `[theme]` in
+/// config.toml.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Theme {
+    overrides: BTreeMap<String, Style>,
+}
+
+impl Theme {
+    pub fn new(overrides: BTreeMap<String, Style>) -> Self {
+        Self { overrides }
+    }
+
+    /// The style for `name`, falling back to its parents: "function.method"
+    /// uses "function" when it has no style of its own. `None` keeps the
+    /// style around it.
+    pub fn style(&self, name: &str) -> Option<Style> {
+        let mut name = name;
+        loop {
+            if let Some(style) = self.overrides.get(name).copied().or_else(|| builtin(name)) {
+                return Some(style);
+            }
+            name = &name[..name.rfind('.')?];
+        }
+    }
+}
+
+/// The built-in theme.
+fn builtin(name: &str) -> Option<Style> {
     let mode = |bg| Style {
         fg: Color::Indexed(0),
         bg: Color::Indexed(bg),
@@ -85,5 +113,25 @@ pub fn theme_style(name: &str) -> Option<Style> {
             ..Style::default()
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_fall_back_to_their_parents_and_config_wins() {
+        let theme = Theme::default();
+        assert_eq!(theme.style("function.method.call"), builtin("function"));
+        assert_eq!(theme.style("nothing.known"), None);
+
+        let red = Style {
+            fg: Color::Indexed(1),
+            ..Style::default()
+        };
+        let theme = Theme::new(BTreeMap::from([("function.method".to_string(), red)]));
+        assert_eq!(theme.style("function.method.call"), Some(red));
+        assert_eq!(theme.style("function"), builtin("function"));
     }
 }

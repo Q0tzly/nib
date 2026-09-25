@@ -11,7 +11,7 @@ use tree_sitter::{InputEdit, Language, Parser, Point, Query, QueryCursor, Tree, 
 use wasmtime::{Cache, CacheConfig, Config, Engine};
 
 use crate::grid::Style;
-use crate::ui::theme_style;
+use crate::ui::Theme;
 
 pub(crate) struct Languages {
     /// Created with the first grammar. Unlike the plugin engine, it has no
@@ -44,8 +44,6 @@ enum EntryState {
 
 struct Highlights {
     query: Query,
-    /// The style of each capture of the query, by index.
-    styles: Vec<Option<Style>>,
 }
 
 /// The syntax of one buffer.
@@ -149,12 +147,7 @@ impl Languages {
             .map(|source| {
                 let query =
                     Query::new(&language, source).map_err(|err| format!("highlights: {err}"))?;
-                let styles = query
-                    .capture_names()
-                    .iter()
-                    .map(|name| capture_style(name))
-                    .collect();
-                Ok::<_, String>(Highlights { query, styles })
+                Ok::<_, String>(Highlights { query })
             })
             .transpose()?;
         Ok((language, highlights))
@@ -196,6 +189,7 @@ impl Languages {
     /// The highlight style of each byte in `range`, or `None` for plain text.
     pub fn highlight(
         &self,
+        theme: &Theme,
         language: usize,
         tree: &Tree,
         text: &Rope,
@@ -209,6 +203,14 @@ impl Languages {
         else {
             return styles;
         };
+        // Looked up per frame, so theme changes show at once; queries have
+        // a few dozen captures.
+        let capture_styles: Vec<Option<Style>> = highlights
+            .query
+            .capture_names()
+            .iter()
+            .map(|name| theme.style(name))
+            .collect();
         let mut cursor = QueryCursor::new();
         cursor.set_byte_range(range.clone());
         let node_text = |node: tree_sitter::Node| {
@@ -222,7 +224,7 @@ impl Languages {
         let mut captures = cursor.captures(&highlights.query, tree.root_node(), node_text);
         while let Some((found, index)) = captures.next() {
             let capture = found.captures()[*index];
-            if let Some(style) = highlights.styles[capture.index as usize] {
+            if let Some(style) = capture_styles[capture.index as usize] {
                 spans.push((capture.node.byte_range(), found.pattern_index, style));
             }
         }
@@ -251,18 +253,6 @@ fn paint(
             *slot = Some(style);
         }
         last = Some(range);
-    }
-}
-
-/// The theme style of a capture such as "function.method", falling back to
-/// "function".
-fn capture_style(name: &str) -> Option<Style> {
-    let mut name = name;
-    loop {
-        if let Some(style) = theme_style(name) {
-            return Some(style);
-        }
-        name = &name[..name.rfind('.')?];
     }
 }
 
@@ -335,14 +325,5 @@ mod tests {
         for (i, n) in expected.into_iter().enumerate() {
             assert_eq!(styles[i], (n > 0).then(|| style(n)), "byte {i}");
         }
-    }
-
-    #[test]
-    fn captures_fall_back_to_their_parents() {
-        assert_eq!(
-            capture_style("function.method.call"),
-            theme_style("function")
-        );
-        assert_eq!(capture_style("nothing.known"), None);
     }
 }

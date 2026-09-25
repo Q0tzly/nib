@@ -4,7 +4,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::editor::{Editor, Menu};
 use crate::grid::{Cursor, CursorShape, Grid, Style, display_width};
-use crate::ui::{Panel, Side, Span, StyledLine, theme_style};
+use crate::ui::{Panel, Side, Span, StyledLine, Theme};
 
 impl Editor {
     /// Draws the editor into `grid`, resizing it to the editor size.
@@ -92,7 +92,7 @@ impl Editor {
                 if y >= end {
                     return cursor;
                 }
-                let x = put_line(grid, 0, y, line, Style::default());
+                let x = put_line(grid, &self.state().theme, 0, y, line, Style::default());
                 debug_assert!(x <= grid.width());
                 if let Some((cursor_line, byte)) = panel.cursor
                     && cursor_line as usize == i
@@ -123,7 +123,12 @@ impl Editor {
             ranges.get(i).is_some_and(|range| range.from() <= offset)
         };
         let normal = Style::default();
-        let selection_bg = theme_style("ui.selection").unwrap_or(normal).bg;
+        let selection_bg = self
+            .state()
+            .theme
+            .style("ui.selection")
+            .unwrap_or(normal)
+            .bg;
         let visible_start = text.line_to_byte(view.top_line.min(text.len_lines() - 1));
         let visible_end = self
             .buffer()
@@ -288,7 +293,7 @@ impl Editor {
 
         let mut x = 0;
         for item in items(Side::Left) {
-            x = put_line(grid, x, y, &item.content, style);
+            x = put_line(grid, &state.theme, x, y, &item.content, style);
         }
         let name = buffer
             .path()
@@ -306,7 +311,7 @@ impl Editor {
             grid.put_str(x, y, &format!("  {message}"), style);
         }
         if right_start > x || self.message().is_none() {
-            put_line(grid, right_start, y, &right, style);
+            put_line(grid, &state.theme, right_start, y, &right, style);
         }
     }
 }
@@ -339,9 +344,9 @@ fn plain(text: &str) -> Span {
 
 /// Puts spans from `x`, styled by the theme, or `base` for names it does not
 /// know. Returns the column after the last grapheme put.
-fn put_line(grid: &mut Grid, mut x: u16, y: u16, line: &[Span], base: Style) -> u16 {
+fn put_line(grid: &mut Grid, theme: &Theme, mut x: u16, y: u16, line: &[Span], base: Style) -> u16 {
     for span in line {
-        let style = theme_style(&span.style).unwrap_or(base);
+        let style = theme.style(&span.style).unwrap_or(base);
         x = grid.put_str(x, y, &span.text, style);
     }
     x
@@ -507,7 +512,8 @@ mod tests {
             Selection::new(vec![crate::Range::new(1, 4)], 0, &text).unwrap();
         let mut grid = Grid::default();
         editor.render(&mut grid);
-        let selected = |x, y| grid.cell(x, y).style == theme_style("ui.selection").unwrap();
+        let selected =
+            |x, y| grid.cell(x, y).style == Theme::default().style("ui.selection").unwrap();
         assert!(!selected(0, 0));
         assert!(selected(1, 0));
         assert!(selected(2, 0), "the line break");

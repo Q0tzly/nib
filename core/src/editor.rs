@@ -8,7 +8,7 @@ use crate::input::{KeyCode, KeyEvent};
 use crate::layout;
 use crate::plugin::{PluginId, Plugins};
 use crate::syntax::{BufferSyntax, Languages};
-use crate::ui::{Panel, StatusItem};
+use crate::ui::{Panel, StatusItem, Theme};
 use crate::view::View;
 
 /// Everything plugins can see and change. While a plugin runs, it is lent to
@@ -34,6 +34,7 @@ pub(crate) struct State {
     /// and scroll position.
     pub hidden_views: HashMap<usize, View>,
     pub languages: Languages,
+    pub theme: Theme,
 }
 
 impl State {
@@ -123,7 +124,7 @@ impl State {
         let tree = syntax.tree.as_ref()?;
         Some(
             self.languages
-                .highlight(syntax.language, tree, buffer.text(), range),
+                .highlight(&self.theme, syntax.language, tree, buffer.text(), range),
         )
     }
 
@@ -279,6 +280,7 @@ impl Default for Editor {
                 last_panel_id: 0,
                 hidden_views: HashMap::new(),
                 languages: Languages::default(),
+                theme: Theme::default(),
             }),
             plugins: Plugins::default(),
             plugin_configs: BTreeMap::new(),
@@ -303,6 +305,7 @@ impl Editor {
         options.init_timeout = config.core.plugin_init_timeout;
         options.memory_limit = config.core.plugin_memory;
         self.state_mut().settings = config.core;
+        self.state_mut().theme = config.theme;
         self.plugin_configs = config.plugins;
     }
 

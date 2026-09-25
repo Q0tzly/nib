@@ -338,3 +338,79 @@ fn inserts_at_line_ends_and_opens_above() {
     type_keys(&mut editor, "u");
     assert_eq!(text(&editor), "  YabX\n");
 }
+
+#[test]
+fn searches_forward_and_backward_wrapping_around() {
+    let mut editor = editor_with_text("one two one two\n");
+    type_keys(&mut editor, "/two<ret>");
+    assert_eq!(primary(&editor), (4, 7));
+    type_keys(&mut editor, "n");
+    assert_eq!(primary(&editor), (12, 15));
+    type_keys(&mut editor, "n");
+    assert_eq!(primary(&editor), (4, 7));
+    assert_eq!(editor.message(), Some("search wrapped around"));
+    type_keys(&mut editor, "N");
+    assert_eq!(primary(&editor), (12, 15));
+    type_keys(&mut editor, "?one<ret>");
+    assert_eq!(primary(&editor), (8, 11));
+
+    // `*` searches for the selection as plain text.
+    let mut editor = editor_with_text("a.b axb a.b\n");
+    type_keys(&mut editor, "E*n");
+    assert_eq!(primary(&editor), (8, 11));
+
+    type_keys(&mut editor, "/(<ret>");
+    assert!(
+        editor.message().unwrap().contains("unclosed"),
+        "{:?}",
+        editor.message()
+    );
+    type_keys(&mut editor, "/zzz<ret>");
+    assert_eq!(editor.message(), Some("no matches for zzz"));
+}
+
+#[test]
+fn selects_matches_inside_selections() {
+    let mut editor = editor_with_text("foo bar foo\nfoo\n");
+    type_keys(&mut editor, "xsfoo<ret>");
+    assert_eq!(ranges(&editor), vec![(0, 3), (8, 11)]);
+    type_keys(&mut editor, "cX<esc>");
+    assert_eq!(text(&editor), "X bar X\nfoo\n");
+}
+
+#[test]
+fn matches_brackets_and_selects_pairs() {
+    let mut editor = editor_with_text("f(a, (b), c) \"q s\"\n");
+    type_keys(&mut editor, "lmm");
+    assert_eq!(cursor(&editor), 11);
+    type_keys(&mut editor, "mm");
+    assert_eq!(cursor(&editor), 1);
+    type_keys(&mut editor, "llllllmi(");
+    assert_eq!(primary(&editor), (6, 7));
+    type_keys(&mut editor, "ma(");
+    assert_eq!(primary(&editor), (5, 8));
+    type_keys(&mut editor, "gglllllllllllllllma\"");
+    assert_eq!(primary(&editor), (13, 18));
+}
+
+#[test]
+fn switches_buffers() {
+    let dir = env::temp_dir();
+    let a = dir.join(format!("nib-{}-ga.txt", std::process::id()));
+    let b = dir.join(format!("nib-{}-gb.txt", std::process::id()));
+    fs::write(&a, "aaa\n").unwrap();
+    fs::write(&b, "bbb\n").unwrap();
+    let mut editor = Editor::default();
+    editor.open(&a).unwrap();
+    editor.load_plugin(&plugin_dir("helix")).unwrap();
+    editor.resize(40, 6);
+    type_keys(&mut editor, &format!(":o {}<ret>", b.display()));
+    assert_eq!(text(&editor), "bbb\n");
+    assert_eq!(primary(&editor), (0, 1));
+    type_keys(&mut editor, "gp");
+    assert_eq!(text(&editor), "aaa\n");
+    type_keys(&mut editor, "gn");
+    assert_eq!(text(&editor), "bbb\n");
+    fs::remove_file(&a).unwrap();
+    fs::remove_file(&b).unwrap();
+}

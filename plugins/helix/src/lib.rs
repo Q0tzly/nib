@@ -35,9 +35,35 @@ enum Pending {
     Find(FindKind),
     /// `r`, waiting for the replacement.
     Replace,
+    /// `m`, for matching pairs.
+    Match,
+    /// `mi` and `ma`, waiting for the pair's char.
+    MatchPair { around: bool },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Prompt {
+    /// `:`
+    Command,
+    /// `/` and `?`
+    Search { backward: bool },
+    /// `s`
+    Select,
+}
+
+impl Prompt {
+    fn label(self) -> &'static str {
+        match self {
+            Prompt::Command => ":",
+            Prompt::Search { backward: false } => "/",
+            Prompt::Search { backward: true } => "?",
+            Prompt::Select => "select: ",
+        }
+    }
 }
 
 struct CommandLine {
+    prompt: Prompt,
     panel: Panel,
     input: String,
 }
@@ -58,6 +84,8 @@ struct Helix {
     command_line: Option<CommandLine>,
     /// What `y`, `d`, and `c` took, one value per selection.
     register: Vec<String>,
+    /// The last search pattern, for `n` and `N`.
+    search: Option<String>,
 }
 
 thread_local! {
@@ -71,6 +99,7 @@ thread_local! {
             appending: false,
             command_line: None,
             register: Vec::new(),
+            search: None,
         })
     };
 }
@@ -291,7 +320,24 @@ impl Helix {
                     to_blocks(view);
                 }
             }
-            ':' => self.open_command_line(),
+            ':' => self.open_prompt(Prompt::Command),
+            '/' => self.open_prompt(Prompt::Search { backward: false }),
+            '?' => self.open_prompt(Prompt::Search { backward: true }),
+            's' => self.open_prompt(Prompt::Select),
+            'n' | 'N' => match self.search.clone() {
+                Some(pattern) => search(view, &pattern, c == 'N'),
+                None => ui::show_message("no search pattern yet"),
+            },
+            '*' => {
+                let doc = Doc::new(view.buffer());
+                let selection = view.selection();
+                let r = selection.ranges[selection.primary as usize];
+                let text = doc.slice(r.anchor.min(r.head), r.anchor.max(r.head));
+                let pattern = regex_escape(&text);
+                ui::show_message(&format!("search: {pattern}"));
+                self.search = Some(pattern);
+            }
+            'm' => self.wait(Pending::Match, count),
             _ => return false,
         }
         true
@@ -315,6 +361,15 @@ impl Helix {
                 });
             }
             Pending::Replace => replace_with(view, c),
+            Pending::Match => match c {
+                'm' => self.move_cursors(view, 1, |doc, pos| {
+                    doc::matching_bracket(doc, pos).unwrap_or(pos)
+                }),
+                'i' => self.pending = Some(Pending::MatchPair { around: false }),
+                'a' => self.pending = Some(Pending::MatchPair { around: true }),
+                _ => {}
+            },
+            Pending::MatchPair { around } => select_pairs(view, c, around),
             Pending::Goto => {
                 let goto: fn(&Doc, u64, Option<u64>) -> u64 = match c {
                     'g' => |doc, _, count| doc.line_start(count.map_or(0, |n| n.saturating_sub(1))),
@@ -329,6 +384,16 @@ impl Helix {
                         }
                     },
                     's' => |doc, pos, _| doc::first_non_blank(doc, pos),
+                    'n' | 'p' => {
+                        let command = if c == 'n' {
+                            "buffer.next"
+                        } else {
+                            "buffer.previous"
+                        };
+                        let _ = commands::call(command, "");
+                        to_blocks(&editor::active_view());
+                        return;
+                    }
                     _ => return,
                 };
                 self.move_cursors(view, 1, |doc, pos| goto(doc, pos, count));
@@ -685,10 +750,12 @@ impl Helix {
         }
     }
 
-    fn open_command_line(&mut self) {
-        let panel = Panel::new(&[vec![span(":", "")]]);
-        panel.set_cursor(Some((0, 1)));
+    fn open_prompt(&mut self, prompt: Prompt) {
+        let label = prompt.label();
+        let panel = Panel::new(&[vec![span(label, "")]]);
+        panel.set_cursor(Some((0, label.len() as u32)));
         self.command_line = Some(CommandLine {
+            prompt,
             panel,
             input: String::new(),
         });
@@ -702,8 +769,9 @@ impl Helix {
             KeyCode::Escape => self.command_line = None,
             KeyCode::Enter => {
                 let input = std::mem::take(&mut line.input);
+                let prompt = line.prompt;
                 self.command_line = None;
-                run_command_line(input.trim());
+                self.run_prompt(prompt, input);
             }
             KeyCode::Backspace if line.input.is_empty() => self.command_line = None,
             KeyCode::Backspace => {
@@ -713,9 +781,22 @@ impl Helix {
             _ => {}
         }
         if let Some(line) = &self.command_line {
-            let text = format!(":{}", line.input);
+            let text = format!("{}{}", line.prompt.label(), line.input);
             line.panel.update(&[vec![span(&text, "")]]);
             line.panel.set_cursor(Some((0, text.len() as u32)));
+        }
+    }
+
+    fn run_prompt(&mut self, prompt: Prompt, input: String) {
+        let view = editor::active_view();
+        match prompt {
+            Prompt::Command => run_command_line(input.trim()),
+            _ if input.is_empty() => {}
+            Prompt::Search { backward } => {
+                search(&view, &input, backward);
+                self.search = Some(input);
+            }
+            Prompt::Select => select_matches(&view, &input),
         }
     }
 }
@@ -730,7 +811,9 @@ fn run_command_line(input: &str) {
         "wq" | "x" => save().and_then(|()| quit(false)),
         "o" | "open" | "e" | "edit" if !arg.is_empty() => {
             let args = format!(r#"{{"path":{}}}"#, json_string(arg));
-            commands::call("buffer.open", &args).map(|_| ())
+            let opened = commands::call("buffer.open", &args).map(|_| ());
+            to_blocks(&editor::active_view());
+            opened
         }
         "o" | "open" | "e" | "edit" => Err(format!(":{command} needs a path")),
         "" => Ok(()),
@@ -1087,4 +1170,97 @@ fn join_lines(view: &View) {
 
 fn edits_for(view: &View, edit: impl Fn(&SelRange) -> Option<Edit>) -> Vec<Edit> {
     view.selection().ranges.iter().filter_map(edit).collect()
+}
+
+/// Selects the next match of `pattern` after the primary selection, or the
+/// previous one before it, wrapping around the buffer.
+fn search(view: &View, pattern: &str, backward: bool) {
+    let buffer = view.buffer();
+    let selection = view.selection();
+    let r = selection.ranges[selection.primary as usize];
+    let (from, to) = (r.anchor.min(r.head), r.anchor.max(r.head));
+    let (start, wrap_start) = if backward {
+        (from, buffer.len())
+    } else {
+        (to, 0)
+    };
+    let found = match buffer.find(pattern, start, backward) {
+        Ok(Some(found)) => Some((found, false)),
+        Ok(None) => match buffer.find(pattern, wrap_start, backward) {
+            Ok(found) => found.map(|found| (found, true)),
+            Err(err) => return ui::show_message(&describe(err)),
+        },
+        Err(err) => return ui::show_message(&describe(err)),
+    };
+    let Some(((start, end), wrapped)) = found else {
+        return ui::show_message(&format!("no matches for {pattern}"));
+    };
+    let doc = Doc::new(buffer);
+    let found = if start == end {
+        block(&doc, start)
+    } else {
+        range(start, end)
+    };
+    set_ranges(view, vec![found], 0);
+    if wrapped {
+        ui::show_message("search wrapped around");
+    }
+}
+
+/// `s`: replaces the selections with the matches of `pattern` inside them.
+fn select_matches(view: &View, pattern: &str) {
+    let buffer = view.buffer();
+    let mut ranges = Vec::new();
+    for r in view.selection().ranges {
+        match buffer.find_all(pattern, r.anchor.min(r.head), r.anchor.max(r.head)) {
+            Ok(found) => ranges.extend(
+                found
+                    .into_iter()
+                    .filter(|(start, end)| start < end)
+                    .map(|(start, end)| range(start, end)),
+            ),
+            Err(err) => return ui::show_message(&describe(err)),
+        }
+    }
+    if ranges.is_empty() {
+        ui::show_message(&format!("no matches for {pattern}"));
+    } else {
+        set_ranges(view, ranges, 0);
+    }
+}
+
+/// `mi` and `ma`: selects inside or around the pair of `c` around each
+/// cursor.
+fn select_pairs(view: &View, c: char, around: bool) {
+    let doc = Doc::new(view.buffer());
+    let selection = view.selection();
+    let ranges = selection
+        .ranges
+        .iter()
+        .map(|r| match doc::surrounding_pair(&doc, cursor(&doc, r), c) {
+            Some((open, close)) if around => range(open, close + 1),
+            Some((open, close)) => range(open + 1, close),
+            None => *r,
+        })
+        .collect();
+    set_ranges(view, ranges, selection.primary);
+}
+
+fn describe(err: editor::Error) -> String {
+    match err {
+        editor::Error::InvalidPattern(message) => message,
+        other => format!("{other:?}"),
+    }
+}
+
+/// Escapes regex syntax, so `*` searches for the selected text as is.
+fn regex_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if "\\.+*?()|[]{}^$#&-~".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }

@@ -318,3 +318,86 @@ pub fn indentation(doc: &Doc, pos: u64) -> String {
         .take_while(|c| *c == ' ' || *c == '\t')
         .collect()
 }
+
+const BRACKETS: [(char, char); 3] = [('(', ')'), ('[', ']'), ('{', '}')];
+
+/// `mm`: the bracket matching the one at `pos`, counting nesting but not
+/// looking inside strings or comments, which needs a syntax tree.
+pub fn matching_bracket(doc: &Doc, pos: u64) -> Option<u64> {
+    let window = doc.lines(doc.line_of(pos), doc.line_of(pos) + 1);
+    let c = window.char_at(pos)?;
+    if let Some(&(open, close)) = BRACKETS.iter().find(|(open, _)| *open == c) {
+        closing(doc, pos + 1, open, close)
+    } else if let Some(&(open, close)) = BRACKETS.iter().find(|(_, close)| *close == c) {
+        opening(doc, pos, open, close)
+    } else {
+        None
+    }
+}
+
+/// The `close` that ends a pair opened just before `from`.
+fn closing(doc: &Doc, from: u64, open: char, close: char) -> Option<u64> {
+    doc.scan(from, true, |window| {
+        let mut depth = 0;
+        for (pos, c) in window.chars_from(from) {
+            if c == open {
+                depth += 1;
+            } else if c == close {
+                if depth == 0 {
+                    return Some(Some(pos));
+                }
+                depth -= 1;
+            }
+        }
+        window.at_end.then_some(None)
+    })
+    .flatten()
+}
+
+/// The `open` that starts a pair closed at or after `before`.
+fn opening(doc: &Doc, before: u64, open: char, close: char) -> Option<u64> {
+    doc.scan(before, false, |window| {
+        let mut depth = 0;
+        for (pos, c) in window.chars_before(before) {
+            if c == close {
+                depth += 1;
+            } else if c == open {
+                if depth == 0 {
+                    return Some(Some(pos));
+                }
+                depth -= 1;
+            }
+        }
+        window.at_start.then_some(None)
+    })
+    .flatten()
+}
+
+/// `mi` and `ma`: the pair of `c` around `pos`, as the positions of its
+/// opening and closing chars. Quotes are looked for on the line of `pos`.
+pub fn surrounding_pair(doc: &Doc, pos: u64, c: char) -> Option<(u64, u64)> {
+    if let Some(&(open, close)) = BRACKETS.iter().find(|(o, cl)| *o == c || *cl == c) {
+        let line = doc.lines(doc.line_of(pos), doc.line_of(pos) + 1);
+        let start = match line.char_at(pos) {
+            Some(here) if here == open => pos,
+            Some(here) if here == close => opening(doc, pos, open, close)?,
+            _ => opening(doc, pos, open, close)?,
+        };
+        return Some((start, closing(doc, start + 1, open, close)?));
+    }
+    if !matches!(c, '"' | '\'' | '`') {
+        return None;
+    }
+    let line = doc.line_of(pos);
+    let window = doc.lines(line, line + 1);
+    let quotes: Vec<u64> = window
+        .chars_from(window.start)
+        .filter(|&(_, ch)| ch == c)
+        .map(|(p, _)| p)
+        .collect();
+    // Quotes pair up from the start of the line.
+    quotes
+        .chunks_exact(2)
+        .map(|pair| (pair[0], pair[1]))
+        .find(|&(open, close)| open <= pos && pos <= close)
+}

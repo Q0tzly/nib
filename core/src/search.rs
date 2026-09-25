@@ -50,7 +50,21 @@ fn compile(pattern: &str) -> Result<Regex, Error> {
     Regex::builder()
         .syntax(syntax::Config::new().multi_line(true))
         .build(pattern)
-        .map_err(|err| Error::InvalidPattern(err.to_string()))
+        .map_err(|err| Error::InvalidPattern(describe(&err)))
+}
+
+/// The one-line reason a pattern is invalid, e.g. "unclosed group". The
+/// error itself only says which pattern failed; the parser's error, its
+/// source, spans several lines with the pattern and a caret.
+fn describe(err: &dyn std::error::Error) -> String {
+    err.source()
+        .and_then(|source| {
+            source
+                .to_string()
+                .lines()
+                .find_map(|line| line.strip_prefix("error: ").map(str::to_string))
+        })
+        .unwrap_or_else(|| err.to_string())
 }
 
 #[cfg(test)]
@@ -104,7 +118,7 @@ mod tests {
         let text = Rope::from_str("あ");
         assert!(matches!(
             find(&text, "(", 0, false),
-            Err(Error::InvalidPattern(_))
+            Err(Error::InvalidPattern(message)) if message == "unclosed group"
         ));
         assert!(matches!(
             find(&text, "a", 1, false),

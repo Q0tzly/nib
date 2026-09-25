@@ -11,10 +11,12 @@ const STANDARD_PLUGINS: &[&str] = &["helix", "rust"];
 
 fn main() {
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("..");
+    // A static, not a const: a const's data is copied into every place that
+    // uses it, which doubled the grammars in the binary.
     let mut code = String::from(
         "/// A plugin's files besides its manifest, by path.\n\
          pub type Files = &'static [(&'static str, &'static [u8])];\n\
-         pub const PLUGINS: &[(&str, &str, Files)] = &[\n",
+         pub static PLUGINS: &[(&str, &str, Files)] = &[\n",
     );
     for name in STANDARD_PLUGINS {
         let dir = root.join("target/plugins").join(name);

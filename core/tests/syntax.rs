@@ -1,4 +1,4 @@
-//! Highlights Rust with the grammar from `plugins/languages/rust`. Build it
+//! Syntax trees with the grammars from `plugins/languages`. Build them
 //! first with `cargo xtask build-plugins`.
 
 use std::{env, fs};
@@ -285,4 +285,88 @@ fn highlights_the_matching_bracket() {
     type_keys(&mut editor, "j");
     assert!(!underlined(&editor, 0, 5));
     fs::remove_file(&path).unwrap();
+}
+
+/// Every standard language: its grammar loads, its queries compile, and a
+/// sample gets some color.
+#[test]
+fn every_language_loads_its_queries() {
+    let samples = [
+        ("rust", "rs", "fn main() {} // c\n"),
+        ("python", "py", "def f(a, b):\n    return 'x'  # c\n"),
+        ("go", "go", "package main\n\nfunc f(a int) {} // c\n"),
+        ("bash", "sh", "f() { echo \"x\"; } # c\n"),
+        ("json", "json", "{\"a\": [1, true]}\n"),
+        ("toml", "toml", "[a]\nb = \"x\" # c\n"),
+        ("yaml", "yaml", "a: [1, \"x\"] # c\n"),
+        ("markdown", "md", "# Title\n\ntext\n"),
+    ];
+    for (name, extension, sample) in samples {
+        let path = env::temp_dir().join(format!("nib-{}-sample.{extension}", std::process::id()));
+        fs::write(&path, sample).unwrap();
+        let mut editor = Editor::default();
+        editor.open(&path).unwrap();
+        editor.load_plugin(&plugin_dir("helix")).unwrap();
+        editor.load_plugin(&plugin_dir(name)).unwrap();
+        editor.resize(40, 6);
+        editor.catch_up();
+        assert_eq!(editor.message(), None, "{name}");
+        let mut grid = Grid::default();
+        editor.render(&mut grid);
+        let colored = (0..grid.width()).any(|x| grid.cell(x, 0).style.fg != Color::Reset);
+        assert!(colored, "{name}: {:?}", screen(&editor)[0]);
+        // Compiles the text objects query.
+        type_keys(&mut editor, "maf");
+        assert_eq!(editor.message(), None, "{name}");
+        fs::remove_file(&path).unwrap();
+    }
+}
+
+#[test]
+fn text_objects_in_other_languages() {
+    let cases = [
+        // (language, extension, text, keys, selected)
+        (
+            "python",
+            "py",
+            "def f(a, b):\n    return a\n",
+            "jmaf",
+            "def f(a, b):\n    return a",
+        ),
+        ("python", "py", "def f(a, b):\n    return a\n", "fbmia", "b"),
+        (
+            "toml",
+            "toml",
+            "[a]\nx = 1\n\n[b]\ny = 2\n",
+            "]t]t",
+            "[b]\ny = 2\n",
+        ),
+        (
+            "markdown",
+            "md",
+            "# One\n\ntext\n\n# Two\n\nmore\n",
+            "]t]t",
+            "# Two\n\nmore\n",
+        ),
+        (
+            "go",
+            "go",
+            "package p\n\nfunc TestX(t int) {}\n",
+            "]T",
+            "func TestX(t int) {}",
+        ),
+    ];
+    for (name, extension, text, keys, expected) in cases {
+        let path = env::temp_dir().join(format!("nib-{}-objects.{extension}", std::process::id()));
+        fs::write(&path, text).unwrap();
+        let mut editor = Editor::default();
+        editor.open(&path).unwrap();
+        editor.load_plugin(&plugin_dir("helix")).unwrap();
+        editor.load_plugin(&plugin_dir(name)).unwrap();
+        editor.resize(40, 12);
+        editor.catch_up();
+        type_keys(&mut editor, keys);
+        assert_eq!(selected(&editor), expected, "{name}: {keys}");
+        fs::remove_file(&path).unwrap();
+    }
 }

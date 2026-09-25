@@ -1,0 +1,19 @@
+# Data only: a grammar and its queries, no plugin code.
+name = "toml"
+version = "0.1.0"
+api = "0.1"
+
+[[languages]]
+name = "toml"
+file-types = ["toml"]
+grammar = "tree-sitter-toml.wasm"
+
+[languages.queries]
+highlights = "queries/highlights.scm"
+textobjects = "queries/textobjects.scm"
+
+# Fetched and checked by `cargo xtask build-plugins`; not in the repository.
+[[fetch]]
+file = "tree-sitter-toml.wasm"
+url = "https://github.com/tree-sitter-grammars/tree-sitter-toml/releases/download/v0.7.0/tree-sitter-toml.wasm"
+sha256 = "1ac6a83826c35a68857f8325e00c78f6bcbef4eb6db3931a6cf3041f76e5e09f"

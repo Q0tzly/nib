@@ -141,7 +141,23 @@ fn builtin(name: &str) -> Option<Style> {
         "function.macro" => Some(fg(6)),
         "type" | "constructor" | "attribute" | "label" => Some(fg(3)),
         "string" => Some(fg(2)),
-        "escape" | "constant" => Some(fg(6)),
+        "escape" | "constant" | "number" | "boolean" => Some(fg(6)),
+        // Keys in TOML, YAML, and JSON, and fields.
+        "property" | "string.special.key" => Some(fg(4)),
+        "punctuation.special" => Some(fg(8)),
+        // Markdown.
+        "text.title" => Some(Style {
+            fg: Color::Indexed(4),
+            bold: true,
+            ..Style::default()
+        }),
+        "text.literal" => Some(fg(2)),
+        "text.reference" => Some(fg(6)),
+        "text.uri" => Some(Style {
+            fg: Color::Indexed(6),
+            underline: true,
+            ..Style::default()
+        }),
         "variable.builtin" => Some(fg(1)),
         "comment" => Some(Style {
             fg: Color::Indexed(8),

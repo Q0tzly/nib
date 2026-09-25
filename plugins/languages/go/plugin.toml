@@ -1,0 +1,19 @@
+# Data only: a grammar and its queries, no plugin code.
+name = "go"
+version = "0.1.0"
+api = "0.1"
+
+[[languages]]
+name = "go"
+file-types = ["go"]
+grammar = "tree-sitter-go.wasm"
+
+[languages.queries]
+highlights = "queries/highlights.scm"
+textobjects = "queries/textobjects.scm"
+
+# Fetched and checked by `cargo xtask build-plugins`; not in the repository.
+[[fetch]]
+file = "tree-sitter-go.wasm"
+url = "https://github.com/tree-sitter/tree-sitter-go/releases/download/v0.25.0/tree-sitter-go.wasm"
+sha256 = "9504573f352b20be7f2f1911754d710622aedc15afff16d5ed8fb5645681aee7"

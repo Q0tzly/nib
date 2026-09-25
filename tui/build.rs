@@ -7,7 +7,9 @@ use std::{env, fs};
 
 /// Built in, in load order: the keymap first, so it is at the bottom of the
 /// input stack.
-const STANDARD_PLUGINS: &[&str] = &["helix", "rust"];
+const STANDARD_PLUGINS: &[&str] = &[
+    "helix", "bash", "go", "json", "markdown", "python", "rust", "toml", "yaml",
+];
 
 fn main() {
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("..");

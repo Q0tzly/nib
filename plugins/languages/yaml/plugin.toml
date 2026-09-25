@@ -1,0 +1,19 @@
+# Data only: a grammar and its queries, no plugin code.
+name = "yaml"
+version = "0.1.0"
+api = "0.1"
+
+[[languages]]
+name = "yaml"
+file-types = ["yaml", "yml"]
+grammar = "tree-sitter-yaml.wasm"
+
+[languages.queries]
+highlights = "queries/highlights.scm"
+textobjects = "queries/textobjects.scm"
+
+# Fetched and checked by `cargo xtask build-plugins`; not in the repository.
+[[fetch]]
+file = "tree-sitter-yaml.wasm"
+url = "https://github.com/tree-sitter-grammars/tree-sitter-yaml/releases/download/v0.7.2/tree-sitter-yaml.wasm"
+sha256 = "0a0e5ebcfeb0b2bf272d071396eeed107b2c4b2617b69d5959b13f78b357a4d6"

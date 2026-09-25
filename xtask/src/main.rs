@@ -48,25 +48,113 @@ fn build_plugins() -> Result<(), String> {
     }
 
     for dir in plugin_dirs(&root.join("plugins"))? {
-        let package = read_toml(&dir.join("Cargo.toml"))?;
-        let package = package["package"]["name"]
-            .as_str()
-            .ok_or_else(|| format!("{}: no package name", dir.display()))?;
         let manifest = read_toml(&dir.join("plugin.toml"))?;
         let name = manifest["name"]
             .as_str()
             .ok_or_else(|| format!("{}: plugin.toml has no name", dir.display()))?;
-
-        let wasm = target
-            .join("wasm32-wasip2/release")
-            .join(format!("{}.wasm", package.replace('-', "_")));
         let out = target.join("plugins").join(name);
+        if out.exists() {
+            fs::remove_dir_all(&out).map_err(|err| format!("{}: {err}", out.display()))?;
+        }
         fs::create_dir_all(&out).map_err(|err| format!("{}: {err}", out.display()))?;
-        copy(&wasm, &out.join("plugin.wasm"))?;
-        copy(&dir.join("plugin.toml"), &out.join("plugin.toml"))?;
+
+        // A plugin with a Cargo.toml has code; one without is data only.
+        if dir.join("Cargo.toml").is_file() {
+            let package = read_toml(&dir.join("Cargo.toml"))?;
+            let package = package["package"]["name"]
+                .as_str()
+                .ok_or_else(|| format!("{}: no package name", dir.display()))?;
+            let wasm = target
+                .join("wasm32-wasip2/release")
+                .join(format!("{}.wasm", package.replace('-', "_")));
+            copy(&wasm, &out.join("plugin.wasm"))?;
+        }
+        copy_data(&dir, &out)?;
+        for fetch in manifest
+            .get("fetch")
+            .and_then(|f| f.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let field = |key: &str| {
+                fetch
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| format!("{}: fetch needs {key}", dir.display()))
+            };
+            let file = fetch_checked(&target, field("url")?, field("sha256")?)?;
+            copy(&file, &out.join(field("file")?))?;
+        }
         println!("built {name} -> {}", out.display());
     }
     Ok(())
+}
+
+/// Copies a plugin's files besides its code: the manifest, queries, and
+/// such.
+fn copy_data(from: &Path, to: &Path) -> Result<(), String> {
+    let entries = fs::read_dir(from).map_err(|err| format!("{}: {err}", from.display()))?;
+    for entry in entries {
+        let path = entry.map_err(|err| err.to_string())?.path();
+        let name = path.file_name().unwrap_or_default();
+        if ["Cargo.toml", "Cargo.lock", "src", "target"]
+            .iter()
+            .any(|skip| name == *skip)
+        {
+            continue;
+        }
+        let dest = to.join(name);
+        if path.is_dir() {
+            fs::create_dir_all(&dest).map_err(|err| format!("{}: {err}", dest.display()))?;
+            copy_data(&path, &dest)?;
+        } else {
+            copy(&path, &dest)?;
+        }
+    }
+    Ok(())
+}
+
+/// Downloads `url` once into `target/downloads`, keyed by its SHA-256, and
+/// fails if the content does not match.
+fn fetch_checked(target: &Path, url: &str, sha256: &str) -> Result<PathBuf, String> {
+    let dir = target.join("downloads");
+    let file = dir.join(sha256);
+    if file.is_file() && hash(&file)? == sha256 {
+        return Ok(file);
+    }
+    fs::create_dir_all(&dir).map_err(|err| format!("{}: {err}", dir.display()))?;
+    let partial = dir.join(format!("{sha256}.part"));
+    let status = Command::new("curl")
+        .args([
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--output",
+        ])
+        .arg(&partial)
+        .arg(url)
+        .status()
+        .map_err(|err| format!("failed to run curl: {err}"))?;
+    if !status.success() {
+        return Err(format!("downloading {url} failed"));
+    }
+    let actual = hash(&partial)?;
+    if actual != sha256 {
+        let _ = fs::remove_file(&partial);
+        return Err(format!("{url} has SHA-256 {actual}, expected {sha256}"));
+    }
+    fs::rename(&partial, &file).map_err(|err| format!("{}: {err}", file.display()))?;
+    Ok(file)
+}
+
+fn hash(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let bytes = fs::read(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    Ok(Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 /// Fails early with a fix, instead of a missing `core` crate deep in the
@@ -98,7 +186,7 @@ fn plugin_dirs(dir: &Path) -> Result<Vec<PathBuf>, String> {
     let entries = fs::read_dir(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
     for entry in entries {
         let path = entry.map_err(|err| err.to_string())?.path();
-        if !path.is_dir() || path.ends_with("target") {
+        if !path.is_dir() || path.ends_with("target") || path.ends_with("src") {
             continue;
         }
         if path.join("plugin.toml").is_file() {

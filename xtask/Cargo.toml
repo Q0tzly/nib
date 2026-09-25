@@ -6,4 +6,5 @@ license.workspace = true
 publish = false
 
 [dependencies]
+sha2 = "0.10"
 toml = "1"

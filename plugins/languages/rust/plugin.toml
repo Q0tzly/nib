@@ -1,0 +1,16 @@
+# Data only: a grammar and its queries, no plugin code.
+name = "rust"
+version = "0.1.0"
+api = "0.1"
+
+[[languages]]
+name = "rust"
+file-types = ["rs"]
+grammar = "tree-sitter-rust.wasm"
+highlights = "queries/highlights.scm"
+
+# Fetched and checked by `cargo xtask build-plugins`; not in the repository.
+[[fetch]]
+file = "tree-sitter-rust.wasm"
+url = "https://github.com/tree-sitter/tree-sitter-rust/releases/download/v0.24.2/tree-sitter-rust.wasm"
+sha256 = "24c89bd9252255e4aebbcbd7d2d308bd92c86dd95a130fdc80efa49577b8d738"

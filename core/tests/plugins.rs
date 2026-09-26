@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
-use nib_core::{Config, Editor, KeyCode, KeyEvent, Menu, PluginOptions, Range};
+use nib_core::{Config, Editor, KeyCode, KeyEvent, Menu, PluginOptions, PluginSource, Range};
 
 mod common;
 use common::{key, plugin_dir, screen};
@@ -129,6 +129,30 @@ fn api_version_mismatch_is_rejected() {
     let err = Editor::default().load_plugin(&dir).unwrap_err();
     fs::remove_dir_all(&dir).unwrap();
     assert!(err.to_string().contains("needs API 0.0"), "{err}");
+}
+
+#[test]
+fn plugins_load_together_in_order() {
+    let missing = env::temp_dir().join(format!("nib-{}-no-plugin", std::process::id()));
+    let (insert, events, rust) = (
+        plugin_dir("test-insert"),
+        plugin_dir("test-events"),
+        plugin_dir("rust"),
+    );
+    let mut editor = Editor::default();
+    let loaded = editor.load_plugins(&[
+        PluginSource::Dir(&insert),
+        PluginSource::Dir(&missing),
+        PluginSource::Dir(&rust),
+        PluginSource::Dir(&events),
+    ]);
+    assert!(loaded[0].is_ok() && loaded[2].is_ok() && loaded[3].is_ok());
+    // One that fails leaves the others loaded.
+    assert!(loaded[1].is_err());
+    let names: Vec<_> = editor.plugins().into_iter().map(|p| p.name).collect();
+    assert_eq!(names, ["test-insert", "rust", "test-events"]);
+    editor.handle_key(key('x'));
+    assert_eq!(editor.buffer().text().to_string(), "x");
 }
 
 /// Prints the cost of sending one key through a plugin. Run with

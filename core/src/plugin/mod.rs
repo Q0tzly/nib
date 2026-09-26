@@ -149,7 +149,7 @@ impl std::fmt::Display for Interrupted {
 impl std::error::Error for Interrupted {}
 
 /// Where a plugin's manifest and code come from.
-enum Source<'a> {
+pub enum PluginSource<'a> {
     Dir(&'a Path),
     /// Built into the editor: the manifest and the other files by path.
     Bytes {
@@ -158,17 +158,17 @@ enum Source<'a> {
     },
 }
 
-impl Source<'_> {
+impl PluginSource<'_> {
     /// Built-in files are borrowed, not copied: languages keep their
     /// grammars until first used, megabytes for the standard ones.
     fn read(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>, String> {
         match self {
-            Source::Dir(dir) => match std::fs::read(dir.join(path)) {
+            PluginSource::Dir(dir) => match std::fs::read(dir.join(path)) {
                 Ok(bytes) => Ok(Some(Cow::Owned(bytes))),
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
                 Err(err) => Err(format!("{path}: {err}")),
             },
-            Source::Bytes { files, .. } => Ok(files
+            PluginSource::Bytes { files, .. } => Ok(files
                 .iter()
                 .find(|(name, _)| *name == path)
                 .map(|(_, bytes)| Cow::Borrowed(*bytes))),
@@ -358,7 +358,7 @@ impl Editor {
     /// Loads the plugin in `dir` and calls its `init` with its table from
     /// config.toml.
     pub fn load_plugin(&mut self, dir: &Path) -> Result<(), Error> {
-        self.add_plugin(Source::Dir(dir))
+        self.add_plugin(PluginSource::Dir(dir))
     }
 
     /// Loads a plugin built into the editor from its manifest and its other
@@ -368,15 +368,65 @@ impl Editor {
         manifest: &str,
         files: &'static [(&'static str, &'static [u8])],
     ) -> Result<(), Error> {
-        self.add_plugin(Source::Bytes { manifest, files })
+        self.add_plugin(PluginSource::Bytes { manifest, files })
     }
 
-    fn add_plugin(&mut self, source: Source) -> Result<(), Error> {
+    /// Loads plugins in order, as `load_plugin` and `load_builtin_plugin`
+    /// do one by one, but compiles them all at once: taking their compiled
+    /// code from the cache is most of a plugin's startup, milliseconds each.
+    pub fn load_plugins(&mut self, sources: &[PluginSource]) -> Vec<Result<(), Error>> {
+        let read: Vec<_> = sources.iter().map(|s| self.read_plugin(s)).collect();
+        let has_code = read.iter().any(|r| matches!(r, Ok((_, Some(_)))));
+        let engine: Option<Result<Engine, String>> =
+            has_code.then(|| self.engine().cloned().map_err(|err| err.to_string()));
+        let compiled: Vec<Result<(manifest::Manifest, Option<Component>), Error>> =
+            thread::scope(|scope| {
+                let jobs: Vec<_> = read
+                    .into_iter()
+                    .map(|read| {
+                        let engine = &engine;
+                        scope.spawn(move || {
+                            let (manifest, wasm) = read?;
+                            let Some(wasm) = wasm else {
+                                return Ok((manifest, None));
+                            };
+                            let engine = engine.as_ref().expect("made when any has code");
+                            let engine =
+                                engine.as_ref().map_err(|err| Error::Plugin(err.clone()))?;
+                            let component = compile_component(engine, &manifest, &wasm)?;
+                            Ok((manifest, Some(component)))
+                        })
+                    })
+                    .collect();
+                jobs.into_iter()
+                    .map(|job| job.join().expect("compiling a plugin panicked"))
+                    .collect()
+            });
+        sources
+            .iter()
+            .zip(compiled)
+            .map(|(source, compiled)| {
+                let (manifest, component) = compiled?;
+                self.add_compiled(source, manifest, component)
+            })
+            .collect()
+    }
+
+    fn add_plugin(&mut self, source: PluginSource) -> Result<(), Error> {
         let (manifest, component) = self.compile(&source)?;
+        self.add_compiled(&source, manifest, component)
+    }
+
+    fn add_compiled(
+        &mut self,
+        source: &PluginSource,
+        manifest: manifest::Manifest,
+        component: Option<Component>,
+    ) -> Result<(), Error> {
         if self.plugins.entries.iter().any(|p| p.name == manifest.name) {
             return Err(Error::Plugin(format!("{}: already loaded", manifest.name)));
         }
-        self.add_languages(&manifest, &source)
+        self.add_languages(&manifest, source)
             .map_err(|err| Error::Plugin(format!("{}: {err}", manifest.name)))?;
         let settings = self.plugin_config(&manifest.name);
         let options = &self.plugins.options;
@@ -394,9 +444,9 @@ impl Editor {
         self.plugins.entries.push(Plugin {
             name: manifest.name.clone(),
             version: manifest.version,
-            dir: match source {
-                Source::Dir(dir) => Some(dir.to_path_buf()),
-                Source::Bytes { .. } => None,
+            dir: match *source {
+                PluginSource::Dir(dir) => Some(dir.to_path_buf()),
+                PluginSource::Bytes { .. } => None,
             },
             component,
             config: settings.settings,
@@ -427,7 +477,7 @@ impl Editor {
     fn add_languages(
         &mut self,
         manifest: &manifest::Manifest,
-        source: &Source,
+        source: &PluginSource,
     ) -> Result<(), String> {
         for language in &manifest.languages {
             let grammar = source
@@ -459,11 +509,22 @@ impl Editor {
     /// plugin has code.
     fn compile(
         &mut self,
-        source: &Source,
+        source: &PluginSource,
     ) -> Result<(manifest::Manifest, Option<Component>), Error> {
+        let (manifest, wasm) = self.read_plugin(source)?;
+        let Some(wasm) = wasm else {
+            return Ok((manifest, None));
+        };
+        let component = compile_component(self.engine()?, &manifest, &wasm)?;
+        Ok((manifest, Some(component)))
+    }
+
+    /// Reads and checks the manifest, and reads the code if the plugin has
+    /// any; a language, for one, is only data.
+    fn read_plugin(&self, source: &PluginSource) -> Result<ReadPlugin, Error> {
         let manifest = match source {
-            Source::Dir(dir) => manifest::read(&dir.join("plugin.toml"))?,
-            Source::Bytes { manifest, .. } => manifest::parse(manifest, "built-in plugin")?,
+            PluginSource::Dir(dir) => manifest::read(&dir.join("plugin.toml"))?,
+            PluginSource::Bytes { manifest, .. } => manifest::parse(manifest, "built-in plugin")?,
         };
         let fail = |message: String| Error::Plugin(format!("{}: {message}", manifest.name));
         if manifest.api != API_VERSION {
@@ -472,19 +533,20 @@ impl Editor {
                 manifest.api
             )));
         }
-        let Some(wasm) = source.read("plugin.wasm").map_err(fail)? else {
-            // Data only, such as a language.
-            return Ok((manifest, None));
-        };
+        let wasm = source.read("plugin.wasm").map_err(fail)?;
+        Ok((manifest, wasm))
+    }
+
+    /// The engine plugins run on, started with the first plugin that has
+    /// code.
+    fn engine(&mut self) -> Result<&Engine, Error> {
         if self.plugins.runtime.is_none() {
             let runtime = Runtime::new(&self.plugins.options).map_err(|err| {
                 Error::Plugin(format!("starting the plugin runtime failed: {err}"))
             })?;
             self.plugins.runtime = Some(runtime);
         }
-        let engine = &self.plugins.runtime.as_ref().expect("created above").engine;
-        let component = Component::new(engine, &wasm).map_err(|err| fail(format!("{err:#}")))?;
-        Ok((manifest, Some(component)))
+        Ok(&self.plugins.runtime.as_ref().expect("created above").engine)
     }
 
     /// Stops the plugin, forgets its failures, and starts it again.
@@ -513,12 +575,12 @@ impl Editor {
         };
         let name = plugin.name.clone();
         let (manifest, component) = self
-            .compile(&Source::Dir(&dir))
+            .compile(&PluginSource::Dir(&dir))
             .map_err(|err| err.to_string())?;
         if manifest.name != name {
             return Err(format!("its name changed to {}", manifest.name));
         }
-        self.add_languages(&manifest, &Source::Dir(&dir))?;
+        self.add_languages(&manifest, &PluginSource::Dir(&dir))?;
         let plugin = &mut self.plugins.entries[id];
         plugin.version = manifest.version;
         plugin.subscriptions = manifest.events;
@@ -1040,6 +1102,17 @@ fn panic_message(stderr: &[u8]) -> Option<String> {
     let mut lines = stderr.lines();
     lines.find(|line| line.contains("panicked at"))?;
     lines.next().map(|line| format!("panicked: {line}"))
+}
+
+/// A plugin's manifest, and its code if it has any.
+type ReadPlugin = (manifest::Manifest, Option<Cow<'static, [u8]>>);
+
+fn compile_component(
+    engine: &Engine,
+    manifest: &manifest::Manifest,
+    wasm: &[u8],
+) -> Result<Component, Error> {
+    Component::new(engine, wasm).map_err(|err| Error::Plugin(format!("{}: {err:#}", manifest.name)))
 }
 
 #[cfg(test)]

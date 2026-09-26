@@ -13,7 +13,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use nib_core::{Config, Editor, plugin_name};
+use nib_core::{Config, Editor, PluginSource, plugin_name};
 
 use settings::{Entry, Source};
 
@@ -117,22 +117,36 @@ fn load_plugins(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| err.to_string())?;
     let mut failures = Vec::new();
-    for entry in entries {
-        if !entry.enabled || replaced.contains(&entry.name) {
-            continue;
-        }
-        let loaded = match entry.source {
-            Source::Builtin(i) => {
-                let (_, manifest, files) = builtin::PLUGINS[i];
-                editor
-                    .load_builtin_plugin(manifest, files)
-                    .map_err(|err| err.to_string())
+    let chosen: Vec<Source> = entries
+        .into_iter()
+        .filter(|entry| entry.enabled && !replaced.contains(&entry.name))
+        .filter_map(|entry| {
+            let checked = match &entry.source {
+                Source::Builtin(_) => Ok(()),
+                Source::Dir(dir) => settings::check_name(&entry.name, dir),
+            };
+            match checked {
+                Ok(()) => Some(entry.source),
+                Err(err) => {
+                    failures.push(err);
+                    None
+                }
             }
-            Source::Dir(dir) => settings::check_name(&entry.name, &dir)
-                .and_then(|()| editor.load_plugin(&dir).map_err(|err| err.to_string())),
-        };
+        })
+        .collect();
+    let sources: Vec<_> = chosen
+        .iter()
+        .map(|source| match source {
+            Source::Builtin(i) => {
+                let (_, manifest, files) = builtin::PLUGINS[*i];
+                PluginSource::Bytes { manifest, files }
+            }
+            Source::Dir(dir) => PluginSource::Dir(dir),
+        })
+        .collect();
+    for loaded in editor.load_plugins(&sources) {
         if let Err(err) = loaded {
-            failures.push(err);
+            failures.push(err.to_string());
         }
     }
     for dir in extra {

@@ -59,13 +59,15 @@ fn highlights_and_follows_edits() {
 }
 
 /// Prints where startup time goes, without and with the compile cache. Run
-/// with `cargo test --release -p nib-core --test syntax -- --ignored --nocapture`.
+/// with `cargo test --release -p nib-core --test syntax -- --ignored --nocapture`,
+/// and `NIB_STARTUP_FILE` set to open another Rust file than `src/render.rs`.
 #[test]
 #[ignore]
 fn startup_breakdown() {
     use std::time::Instant;
     let cache = env::temp_dir().join(format!("nib-{}-cache", std::process::id()));
-    let file = env!("CARGO_MANIFEST_DIR").to_string() + "/src/render.rs";
+    let file = env::var("NIB_STARTUP_FILE")
+        .unwrap_or_else(|_| env!("CARGO_MANIFEST_DIR").to_string() + "/src/render.rs");
     for round in ["cold cache", "warm cache"] {
         let started = Instant::now();
         let mut editor = Editor::default();

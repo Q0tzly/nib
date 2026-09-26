@@ -9,6 +9,7 @@
 | [plugin-api.md](plugin-api.md) | WIT の設計方針、イベントとコマンドの流れ、ライフサイクル、権限 |
 | [keymap.md](keymap.md) | モーダルの扱い、キーマップをプラグインで実現するしくみ |
 | [lsp.md](lsp.md) | LSP プラグインの範囲、サーバーの設定、位置の数え方 |
+| [plugin-dev.md](plugin-dev.md) | プラグインの開発（`nib plugin new` / `build` / `test`、テストの書き方、作者向けの文書） |
 | [plugin-install.md](plugin-install.md) | プラグインの配布とインストール（`nib plugin search` / `add` / `update` / `remove`） |
 | [benchmarks.md](benchmarks.md) | vim と Helix との比べ方と結果、nib の起動の内訳、これまでの推移 |
 | [roadmap.md](roadmap.md) | マイルストーン |

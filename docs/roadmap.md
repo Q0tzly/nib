@@ -323,6 +323,27 @@ M1 のゴールは、Helix 風キーマップのプラグインだけで、nib �
 
 M3 を終えた時点で、git のエディタ（`core.editor`）を hx から nib に切り替える。ハイライト、LSP、ファイル選択がそろうのが M3 で、それより前に切り替えると作業のたびに hx に戻ることになる。以降は nib を普段使いしながら、困ったところから直す。
 
+## M5 AI で作れる土台
+
+設計は [plugin-dev.md](plugin-dev.md)。
+
+### M5.1 端末なしのテスト
+
+- キーの並びの記法と、選択の印（Helix のテストの `#[h|]#`）の読み書き
+- `nib plugin test`: プラグインの `tests/*.toml` を、標準プラグインと一緒に端末なしで実行する
+
+確かめ方: テスト用のプラグインと helix プラグインのテストを TOML で書き、通ることと、壊したときに期待と実際が並んで出ることを見る。
+
+### M5.2 作り始めから配るまで
+
+- `nib plugin pack` は、nib が読むファイルだけを入れる
+- `nib plugin build`（Rust と Go）
+- `nib plugin new`（Rust と Go の雛形、`AGENTS.md`）
+- プラグイン作者向けの文書 `sdk/README.md`（英語）
+- Rust の SDK のタグ `sdk/rust/v0.4.2`
+
+確かめ方: `nib plugin new` で作った雛形が、`nib plugin build` と `nib plugin test` をそのまま通ること。
+
 ## 保留中のアイデア
 
 いつやるかは決めていないが、忘れないように書いておく。

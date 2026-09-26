@@ -3,7 +3,7 @@
 use nib_plugin::exports::nib::plugin::guest::{Guest, KeyResult};
 use nib_plugin::nib::plugin::events::Event;
 use nib_plugin::nib::plugin::types::{KeyCode, KeyEvent};
-use nib_plugin::nib::plugin::{commands, input, process};
+use nib_plugin::nib::plugin::{commands, files, input, process};
 
 struct Misbehave;
 
@@ -16,6 +16,7 @@ impl Guest for Misbehave {
         commands::register("panic", "test: panics");
         commands::register("call-back", "test: calls test-events.echo");
         commands::register("spawn", "test: starts a program without the capability");
+        commands::register("walk", "test: lists files without the capability");
         Ok(())
     }
 
@@ -40,6 +41,7 @@ impl Guest for Misbehave {
             // Called from test-events, this calls it back while it waits.
             "call-back" => commands::call("test-events.echo", "back"),
             "spawn" => process::spawn("sort", &[], None).map(|_| "started".into()),
+            "walk" => files::walk(None).map(|id| id.to_string()),
             _ => Err(format!("no command {name}")),
         }
     }

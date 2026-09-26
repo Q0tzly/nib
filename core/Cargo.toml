@@ -21,6 +21,8 @@ serde_json = "1"
 streaming-iterator = "0.1"
 # Loads grammars as WebAssembly on the same wasmtime as the plugins.
 tree-sitter = { version = "0.27", features = ["wasm"] }
+# Lists files for plugins the way ripgrep does, honoring .gitignore.
+ignore = "0.4"
 
 # Its own main: started with --fake-lsp, the test binary acts as the
 # language server the tests talk to.

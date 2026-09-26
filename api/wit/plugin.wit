@@ -176,6 +176,18 @@ interface process {
     spawn: func(command: string, args: list<string>, cwd: option<string>) -> result<child, string>;
 }
 
+/// File lists, for plugins with the "fs-read" capability. The files are
+/// counted on a background thread, so plugins never wait for them.
+interface files {
+    /// Lists the files under `dir`, or the working directory, honoring
+    /// .gitignore and leaving out hidden files. The paths arrive as
+    /// `files-listed` events, relative to `dir` and with `/` between names.
+    /// Returns the job's id.
+    walk: func(dir: option<string>) -> result<u64, string>;
+    /// Stops a job; nothing more arrives from it.
+    cancel: func(id: u64);
+}
+
 /// Events reach `guest.on-event` after the call that caused them, in the
 /// order they happened. A plugin gets the kinds listed in `events` in its
 /// plugin.toml, and its own timers and programs.
@@ -215,6 +227,10 @@ interface events {
     /// ended it.
     record process-exit { process: u64, code: option<s32> }
 
+    /// Up to a thousand paths of a `files.walk` job; the last ones have
+    /// `done`.
+    record files-listed { job: u64, paths: list<string>, done: bool }
+
     variant event {
         buffer-opened(buffer),
         buffer-saved(buffer),
@@ -225,6 +241,8 @@ interface events {
         /// Only to the plugin that started the program.
         process-output(process-output),
         process-exit(process-exit),
+        /// Only to the plugin that asked for the list.
+        files-listed(files-listed),
     }
 
     /// Emits the custom event `<plugin>.<name>` with JSON `data`.
@@ -388,6 +406,7 @@ world plugin {
     import events;
     import timers;
     import process;
+    import files;
 
     export guest;
 }

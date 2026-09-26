@@ -1,6 +1,7 @@
 //! Fuzzy file picker: `picker.files` lists the files of the working
-//! directory with git, or rg outside a repository, and opens the chosen
-//! one. While open, it takes the keys with its own input layer.
+//! directory with the core's `files.walk`, which honors .gitignore, and
+//! opens the chosen one. While open, it takes the keys with its own input
+//! layer.
 
 mod fuzzy;
 
@@ -8,26 +9,13 @@ use std::cell::RefCell;
 
 use nib_plugin::exports::nib::plugin::guest::{Guest, KeyResult};
 use nib_plugin::nib::plugin::events::Event;
-use nib_plugin::nib::plugin::process::{self, Child};
 use nib_plugin::nib::plugin::types::{KeyCode, KeyEvent, Modifiers, Span};
 use nib_plugin::nib::plugin::ui::{self, Panel};
-use nib_plugin::nib::plugin::{commands, input};
+use nib_plugin::nib::plugin::{commands, files, input};
 
 /// Candidates shown at once.
 const ROWS: usize = 10;
 const PROMPT: &str = "files> ";
-
-/// Where the file list comes from, in the order tried.
-const LISTERS: [&[&str]; 2] = [
-    &[
-        "git",
-        "ls-files",
-        "--cached",
-        "--others",
-        "--exclude-standard",
-    ],
-    &["rg", "--files"],
-];
 
 struct Picker {
     panel: Panel,
@@ -36,10 +24,8 @@ struct Picker {
     /// Indices into `files`, best first.
     matches: Vec<usize>,
     selected: usize,
-    /// Still listing: the program and what it printed so far.
-    listing: Option<(Child, Vec<u8>)>,
-    /// The lister in use, as an index into `LISTERS`.
-    lister: usize,
+    /// The `files.walk` job still listing, if any.
+    listing: Option<u64>,
 }
 
 thread_local! {
@@ -83,7 +69,7 @@ impl Guest for Plugin {
             if picker.is_some() {
                 return Ok("null".into());
             }
-            let child = list(0)?;
+            let job = files::walk(None)?;
             input::push_layer();
             let open = picker.insert(Picker {
                 panel: Panel::new(&[]),
@@ -91,8 +77,7 @@ impl Guest for Plugin {
                 files: Vec::new(),
                 matches: Vec::new(),
                 selected: 0,
-                listing: Some((child, Vec::new())),
-                lister: 0,
+                listing: Some(job),
             });
             open.show();
             Ok("null".into())
@@ -104,43 +89,16 @@ impl Guest for Plugin {
             let Some(open) = picker else {
                 return;
             };
-            match ev {
-                Event::ProcessOutput(output) => {
-                    if let Some((child, data)) = &mut open.listing
-                        && child.id() == output.process
-                    {
-                        data.extend(output.data);
-                    }
+            // Shown as they come, so a large tree does not keep it empty.
+            if let Event::FilesListed(listed) = ev
+                && open.listing == Some(listed.job)
+            {
+                open.files.extend(listed.paths);
+                if listed.done {
+                    open.listing = None;
                 }
-                Event::ProcessExit(exit) => {
-                    let Some((child, data)) = open.listing.take_if(|(c, _)| c.id() == exit.process)
-                    else {
-                        return;
-                    };
-                    drop(child);
-                    if exit.code == Some(0) {
-                        open.files = String::from_utf8_lossy(&data)
-                            .lines()
-                            .map(String::from)
-                            .collect();
-                        open.filter();
-                        open.show();
-                        return;
-                    }
-                    // Not a repository, or no git: try the next lister.
-                    let next = open.lister + 1;
-                    match LISTERS.get(next).map(|_| list(next)) {
-                        Some(Ok(child)) => {
-                            open.lister = next;
-                            open.listing = Some((child, Vec::new()));
-                        }
-                        _ => {
-                            close(picker);
-                            ui::show_message("listing files needs git or rg");
-                        }
-                    }
-                }
-                _ => {}
+                open.filter();
+                open.show();
             }
         })
     }
@@ -227,17 +185,12 @@ impl Picker {
     }
 }
 
-/// Starts lister `index` in the working directory.
-fn list(index: usize) -> Result<Child, String> {
-    let (program, args) = LISTERS[index].split_first().expect("not empty");
-    let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-    process::spawn(program, &args, None)
-}
-
-/// Closes the picker: dropping it closes its panel and kills a listing
-/// still running.
+/// Closes the picker: dropping it closes its panel, and a listing still
+/// running is stopped.
 fn close(picker: &mut Option<Picker>) {
-    *picker = None;
+    if let Some(job) = picker.take().and_then(|p| p.listing) {
+        files::cancel(job);
+    }
     input::pop_layer();
 }
 

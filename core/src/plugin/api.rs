@@ -39,7 +39,8 @@ pub(crate) mod bindings {
 }
 
 use bindings::nib::plugin::{
-    commands, editor, events, input, process, settings, syntax, timers, types as wit, ui as wit_ui,
+    commands, editor, events, files, input, process, settings, syntax, timers, types as wit,
+    ui as wit_ui,
 };
 
 /// A buffer as seen by a plugin. The resource's rep is the buffer index.
@@ -580,6 +581,28 @@ impl process::Host for PluginData {
     }
 }
 
+impl files::Host for PluginData {
+    fn walk(&mut self, dir: Option<String>) -> HostResult<Result<u64, String>> {
+        if !self.can_read_files {
+            return Ok(Err("listing files needs the \"fs-read\" capability".into()));
+        }
+        let dir = match dir {
+            Some(dir) => dir.into(),
+            None => std::env::current_dir().unwrap_or_default(),
+        };
+        let owner = self.plugin;
+        Ok(self.state()?.files.list(owner, dir).map(u64::from))
+    }
+
+    fn cancel(&mut self, id: u64) -> HostResult<()> {
+        let owner = self.plugin;
+        if let Ok(id) = u32::try_from(id) {
+            self.state()?.files.cancel(id, owner);
+        }
+        Ok(())
+    }
+}
+
 impl process::HostChild for PluginData {
     fn id(&mut self, child: Resource<ChildHandle>) -> HostResult<u64> {
         Ok(u64::from(child.rep()))
@@ -665,6 +688,13 @@ pub(crate) fn wit_event(event: &Event) -> events::Event {
             process: u64::from(*process),
             code: *code,
         }),
+        Event::FilesListed { job, paths, done } => {
+            events::Event::FilesListed(events::FilesListed {
+                job: u64::from(*job),
+                paths: paths.clone(),
+                done: *done,
+            })
+        }
     }
 }
 

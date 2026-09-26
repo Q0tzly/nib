@@ -270,6 +270,7 @@ impl Guest for Plugin {
                     }
                 }
             }
+            Event::FilesListed(_) => {}
         })
     }
 }

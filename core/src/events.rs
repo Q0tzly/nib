@@ -47,6 +47,11 @@ pub(crate) enum Event {
         process: u32,
         code: Option<i32>,
     },
+    FilesListed {
+        job: u32,
+        paths: Vec<String>,
+        done: bool,
+    },
 }
 
 impl Event {
@@ -60,6 +65,7 @@ impl Event {
             Event::Timer(_) => "timer",
             Event::ProcessOutput { .. } => "process-output",
             Event::ProcessExit { .. } => "process-exit",
+            Event::FilesListed { .. } => "files-listed",
         }
     }
 }

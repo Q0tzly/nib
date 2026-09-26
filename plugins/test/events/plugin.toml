@@ -1,7 +1,7 @@
 name = "test-events"
 version = "0.0.0"
 api = "0.1"
-capabilities = ["process"]
+capabilities = ["process", "fs-read"]
 events = [
     "buffer-opened",
     "buffer-saved",

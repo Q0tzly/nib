@@ -1,5 +1,5 @@
 name = "picker"
-version = "0.1.0"
+version = "0.1.1"
 api = "0.1"
-# Lists files with git or rg.
-capabilities = ["process"]
+# Lists the files of the working directory.
+capabilities = ["fs-read"]

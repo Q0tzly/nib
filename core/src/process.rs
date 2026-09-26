@@ -1,7 +1,6 @@
 //! Programs plugins start. Their output is read on background threads and
-//! queued in an inbox, which wakes the main loop.
+//! queued in the inbox, which wakes the main loop.
 
-use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -9,45 +8,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use crate::background::{Inbox, Message};
 use crate::plugin::PluginId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stream {
     Stdout,
     Stderr,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Message {
-    Output {
-        id: u32,
-        stream: Stream,
-        data: Vec<u8>,
-    },
-    Exit {
-        id: u32,
-        code: Option<i32>,
-    },
-}
-
-/// Called from background threads after they queue a message, so the
-/// frontend can wake its main loop.
-pub type Waker = Arc<dyn Fn() + Send + Sync>;
-
-/// Messages from background threads.
-#[derive(Default)]
-pub(crate) struct Inbox {
-    messages: Mutex<VecDeque<Message>>,
-    waker: Mutex<Option<Waker>>,
-}
-
-impl Inbox {
-    fn push(&self, message: Message) {
-        self.messages.lock().expect("inbox lock").push_back(message);
-        if let Some(waker) = &*self.waker.lock().expect("waker lock") {
-            waker();
-        }
-    }
 }
 
 struct Process {
@@ -57,7 +24,6 @@ struct Process {
     stdin: Option<ChildStdin>,
 }
 
-#[derive(Default)]
 pub(crate) struct Processes {
     list: Vec<Process>,
     last_id: u32,
@@ -65,8 +31,12 @@ pub(crate) struct Processes {
 }
 
 impl Processes {
-    pub fn set_waker(&self, waker: Option<Waker>) {
-        *self.inbox.waker.lock().expect("waker lock") = waker;
+    pub fn new(inbox: Arc<Inbox>) -> Self {
+        Self {
+            list: Vec::new(),
+            last_id: 0,
+            inbox,
+        }
     }
 
     pub fn spawn(
@@ -159,31 +129,14 @@ impl Processes {
         self.list.retain(|p| p.owner != owner);
     }
 
-    /// The queued messages of programs still known, with their owners.
-    /// Programs that exited are forgotten.
-    pub fn take_messages(&mut self) -> Vec<(PluginId, Message)> {
-        let messages: Vec<Message> = self
-            .inbox
-            .messages
-            .lock()
-            .expect("inbox lock")
-            .drain(..)
-            .collect();
-        let mut owned = Vec::new();
-        for message in messages {
-            let id = match &message {
-                Message::Output { id, .. } | Message::Exit { id, .. } => *id,
-            };
-            let Some(process) = self.list.iter().find(|p| p.id == id) else {
-                continue;
-            };
-            let owner = process.owner;
-            if matches!(message, Message::Exit { .. }) {
-                self.list.retain(|p| p.id != id);
-            }
-            owned.push((owner, message));
+    /// The plugin that started program `id`, if it is still known. A
+    /// program that exited is forgotten.
+    pub fn owner(&mut self, id: u32, exited: bool) -> Option<PluginId> {
+        let owner = self.list.iter().find(|p| p.id == id)?.owner;
+        if exited {
+            self.list.retain(|p| p.id != id);
         }
-        owned
+        Some(owner)
     }
 }
 

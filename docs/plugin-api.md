@@ -254,6 +254,7 @@ events = ["buffer-opened", "buffer-changed", "helix.mode_changed"]
 | `<plugin>.<name>` | プラグインが `events.emit(name, json)` で出したもの（custom イベント） | 同上 |
 | `timer` | `timers.set` で予約した時間がたった | 予約したプラグインだけ |
 | `process-output` / `process-exit` | 起動した外部プロセスの出力と終了 | 起動したプラグインだけ |
+| `files-listed` | `files.walk` で頼んだファイルの一覧（1,000 件ずつ） | 頼んだプラグインだけ |
 | `buffer-closed`、`selection-changed`、`paste` | 必要になったときに足す | |
 
 - `buffer-changed` の変更の列は、先頭から順に 1 つずつ適用していけば変更後のテキストになるように並べる。LSP の `didChange` の `contentChanges` と同じ考え方で、変更ごとに、その時点のテキストでの行と列（バイト数）を付ける。LSP プラグインは、これをそのまま差分の同期に使える。
@@ -323,7 +324,7 @@ set-decorations: func(buf: borrow<buffer>, namespace: string, decorations: list<
 | 権限 | 与えるもの |
 |------|------------|
 | （なし） | 上記の API すべてと、プラグイン専用のデータディレクトリ（`~/.local/share/nib/plugins/<name>/`） |
-| `fs-read` / `fs-write` | 作業ディレクトリ以下の読み取り / 書き込み（WASI の preopen で渡す） |
+| `fs-read` / `fs-write` | 作業ディレクトリ以下の読み取り / 書き込み（WASI の preopen で渡す）。`fs-read` は `files.walk` も使える |
 | `process` | `process.spawn` による外部プロセスの起動 |
 | `network` | `wasi:sockets` / `wasi:http` |
 
@@ -360,6 +361,23 @@ interface settings {
 indent = 4
 tab-width = 8
 ```
+
+## ファイルの一覧
+
+```wit
+interface files {
+    /// dir（なければ作業ディレクトリ）の下のファイルを、裏のスレッドで数える。
+    /// 結果は files-listed イベントで少しずつ届く。仕事の id を返す
+    walk: func(dir: option<string>) -> result<u64, string>;
+    cancel: func(id: u64);
+}
+```
+
+- `.gitignore`（と `.ignore`、git の除外設定）を守り、隠しファイルは数えない。ripgrep と同じ `ignore` クレートを使う。
+- 結果は `files-listed(id, paths, done)` のイベントで、1,000 件ずつ届く。`paths` は `dir` からの相対パスで、区切りは `/`。最後の 1 回は `done` が真。
+- イベントは、一覧を頼んだプラグインにだけ届く。
+- 使うには `fs-read` の権限が要る。ファイル名から、利用者のディレクトリの中身がわかるため。
+- WASI のファイル API で数えると、呼び出しのあいだメインスレッドが止まる。この API なら、数えているあいだもエディタは動き続ける（「待たせない」）。
 
 ## 外部プロセス
 

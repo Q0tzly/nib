@@ -107,7 +107,7 @@ fn starting_programs_needs_the_capability() {
         .into_iter()
         .find(|p| p.name == "test-events")
         .unwrap();
-    assert_eq!(events.capabilities, ["process"]);
+    assert_eq!(events.capabilities, ["process", "fs-read"]);
 }
 
 #[test]

@@ -6,16 +6,19 @@ use ropey::Rope;
 use tree_sitter::Tree;
 
 use crate::Error;
+use crate::background::{Inbox, Message, Waker};
 use crate::buffer::Buffer;
 use crate::config::{Config, Indent, PluginConfig, Settings};
 use crate::events::{Command, Event, Timer};
+use crate::files::FileJobs;
 use crate::input::{KeyCode, KeyEvent};
 use crate::layout;
 use crate::plugin::{PluginId, Plugins};
-use crate::process::{Message, Processes, Waker};
+use crate::process::Processes;
 use crate::syntax::{BufferSyntax, Languages};
 use crate::ui::{Panel, Popup, StatusItem, Theme};
 use crate::view::View;
+use std::sync::Arc;
 
 /// Everything plugins can see and change. While a plugin runs, it is lent to
 /// that plugin's store so host functions can reach it.
@@ -46,8 +49,12 @@ pub(crate) struct State {
     pub commands: Vec<Command>,
     pub timers: Vec<Timer>,
     pub last_timer_id: u64,
+    /// Where background threads queue their messages.
+    pub inbox: Arc<Inbox>,
     /// Programs plugins started.
     pub processes: Processes,
+    /// File lists being made for plugins.
+    pub files: FileJobs,
     /// Views of buffers not shown, so switching back restores the selection
     /// and scroll position.
     pub hidden_views: HashMap<usize, View>,
@@ -342,6 +349,7 @@ impl State {
         self.commands.retain(|command| command.owner != plugin);
         self.timers.retain(|timer| timer.owner != plugin);
         self.processes.remove_owner(plugin);
+        self.files.remove_owner(plugin);
         self.events.retain(|(target, _)| *target != Some(plugin));
     }
 
@@ -428,6 +436,7 @@ pub(crate) const CORE_COMMANDS: &[(&str, &str)] = &[
 impl Default for Editor {
     /// Starts with an empty buffer that has no path.
     fn default() -> Self {
+        let inbox = Arc::new(Inbox::default());
         Self {
             state: Some(State {
                 buffers: vec![Buffer::default()],
@@ -448,7 +457,9 @@ impl Default for Editor {
                 commands: Vec::new(),
                 timers: Vec::new(),
                 last_timer_id: 0,
-                processes: Processes::default(),
+                processes: Processes::new(inbox.clone()),
+                files: FileJobs::new(inbox.clone()),
+                inbox,
                 hidden_views: HashMap::new(),
                 languages: Languages::default(),
                 theme: Theme::default(),
@@ -560,26 +571,40 @@ impl Editor {
     /// program's output, so the frontend can wake up and call
     /// `run_background`.
     pub fn set_waker(&mut self, waker: Option<Waker>) {
-        self.state_mut().processes.set_waker(waker);
+        self.state_mut().inbox.set_waker(waker);
     }
 
     /// Hands what background threads queued to the plugins. Returns whether
     /// there was anything.
     pub fn run_background(&mut self) -> bool {
-        let messages = self.state_mut().processes.take_messages();
+        let messages = self.state().inbox.take();
         if messages.is_empty() {
             return false;
         }
-        for (owner, message) in messages {
-            let event = match message {
-                Message::Output { id, stream, data } => Event::ProcessOutput {
-                    process: id,
-                    stream,
-                    data,
-                },
-                Message::Exit { id, code } => Event::ProcessExit { process: id, code },
+        for message in messages {
+            let state = self.state_mut();
+            let (owner, event) = match message {
+                Message::Output { id, stream, data } => (
+                    state.processes.owner(id, false),
+                    Event::ProcessOutput {
+                        process: id,
+                        stream,
+                        data,
+                    },
+                ),
+                Message::Exit { id, code } => (
+                    state.processes.owner(id, true),
+                    Event::ProcessExit { process: id, code },
+                ),
+                Message::Files { job, paths, done } => (
+                    state.files.owner(job, done),
+                    Event::FilesListed { job, paths, done },
+                ),
             };
-            self.state_mut().push_event(Some(owner), event);
+            // Messages of what was cancelled or stopped are dropped.
+            if let Some(owner) = owner {
+                state.push_event(Some(owner), event);
+            }
         }
         self.after_plugins_ran();
         true

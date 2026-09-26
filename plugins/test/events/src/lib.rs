@@ -8,7 +8,7 @@ use nib_plugin::exports::nib::plugin::guest::{Guest, KeyResult};
 use nib_plugin::nib::plugin::events::{self, Event};
 use nib_plugin::nib::plugin::process::{self, Child, Stream};
 use nib_plugin::nib::plugin::types::{Edit, KeyEvent, UndoMode};
-use nib_plugin::nib::plugin::{commands, editor, timers};
+use nib_plugin::nib::plugin::{commands, editor, files, timers};
 
 /// A program it started, and what it printed so far.
 struct Program {
@@ -22,9 +22,21 @@ thread_local! {
     static PROGRAMS: RefCell<Vec<Program>> = const { RefCell::new(Vec::new()) };
 }
 
-const COMMANDS: [&str; 12] = [
-    "echo", "call", "log", "emit", "timer", "cancel", "edit", "buffers", "spawn", "write", "close",
+const COMMANDS: [&str; 14] = [
+    "echo",
+    "call",
+    "log",
+    "emit",
+    "timer",
+    "cancel",
+    "edit",
+    "buffers",
+    "spawn",
+    "write",
+    "close",
     "kill",
+    "walk",
+    "stop-walk",
 ];
 
 struct Events;
@@ -103,6 +115,15 @@ impl Guest for Events {
             }
             "close" => with_program(&args, |p| p.child.close_stdin()).map(|()| String::new()),
             "kill" => with_program(&args, |p| p.child.kill()).map(|()| String::new()),
+            // Lists the files under the directory given, or the working one.
+            "walk" => {
+                let dir = (!args.is_empty()).then_some(args.as_str());
+                Ok(files::walk(dir)?.to_string())
+            }
+            "stop-walk" => {
+                files::cancel(args.parse().map_err(|_| "stop-walk needs an id")?);
+                Ok(String::new())
+            }
             _ => Err(format!("no command {name}")),
         }
     }
@@ -163,6 +184,16 @@ impl Guest for Events {
                     printed(&program.stderr)
                 )
             }),
+            Event::FilesListed(listed) => {
+                let mut paths = listed.paths;
+                paths.sort();
+                format!(
+                    "files {} {} done={}",
+                    listed.job,
+                    paths.join(","),
+                    listed.done
+                )
+            }
         };
         LOG.with_borrow_mut(|log| log.push(entry));
     }

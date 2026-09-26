@@ -273,6 +273,8 @@ pub(crate) struct PluginData {
     plugin: PluginId,
     /// It may start programs.
     can_spawn: bool,
+    /// It may list files: "fs-read" or "fs-write".
+    can_read_files: bool,
     clock: CallClock,
     interrupts: Arc<AtomicU64>,
     wasi: WasiCtx,
@@ -876,6 +878,10 @@ fn start_in(plugins: &mut Plugins, state: &mut Option<State>, id: PluginId) -> R
         plugins: None,
         plugin: id,
         can_spawn: plugin.capabilities.iter().any(|c| c == "process"),
+        can_read_files: plugin
+            .capabilities
+            .iter()
+            .any(|c| c == "fs-read" || c == "fs-write"),
         clock: CallClock {
             started: Instant::now(),
             limit: limits.init,

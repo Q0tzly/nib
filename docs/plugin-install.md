@@ -24,7 +24,7 @@ nib-foo-0.1.0.nib.tar.gz
 └── queries/...
 ```
 
-プラグインの作者は、`nib plugin pack <dir>` でこの形のアーカイブを作る。`<dir>` は `cargo xtask build-plugins` が作る `target/plugins/<name>/` のような、ビルド済みのディレクトリ。
+プラグインの作者は、`nib plugin pack <dir>` でこの形のアーカイブを作る。`<dir>` はビルド済みのディレクトリ（`nib plugin build` のあとのプラグインのディレクトリや、`cargo xtask build-plugins` が作る `target/plugins/<name>/`）。入れるのは nib が読むものだけ: `plugin.toml`、`plugin.wasm`、`[[languages]]` が指す文法とクエリ、`LICENSE*`。ソースやビルドの途中のファイル（`src/`、`target/`）は入れない。
 
 ## 入れ方
 

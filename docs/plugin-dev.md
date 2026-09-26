@@ -131,7 +131,7 @@ ihello<esc>       i、h、e、l、l、o、Esc
 
 ## `nib plugin pack` が入れるもの
 
-今はディレクトリの中身を全部入れる。Rust の雛形では `target/` や `src/` まで入ってしまうので、nib が読むものだけにする: `plugin.toml`、`plugin.wasm`、マニフェストの `[[languages]]` が指す文法とクエリ、`LICENSE*`。
+ディレクトリの中身を全部入れると、Rust の雛形では `target/` や `src/` まで入ってしまうので、nib が読むものだけにする: `plugin.toml`、`plugin.wasm`、マニフェストの `[[languages]]` が指す文法とクエリ、`LICENSE*`。
 
 ## API の文書
 

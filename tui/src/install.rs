@@ -79,38 +79,38 @@ impl Store {
 }
 
 /// `nib plugin pack <dir>`: writes `<name>-<version>.nib.tar.gz` into `out`.
+/// Packs what nib reads of the plugin in `dir`: its manifest, its code, the
+/// files of its languages, and its licenses. Not sources or build output,
+/// which a plugin's directory often holds too.
 pub fn pack(dir: &Path, out: &Path) -> Result<PathBuf, String> {
     let manifest = read_manifest(dir).map_err(|err| err.to_string())?;
     let file = out.join(format!("{}-{}{SUFFIX}", manifest.name, manifest.version));
     let fail = |err: io::Error| format!("{}: {err}", file.display());
+    let mut names = vec!["plugin.toml".to_string()];
+    if manifest.has_code {
+        names.push("plugin.wasm".into());
+    }
+    names.extend(manifest.language_files);
+    let licenses = fs::read_dir(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
+    names.extend(licenses.filter_map(|entry| {
+        let name = entry.ok()?.file_name().into_string().ok()?;
+        name.starts_with("LICENSE").then_some(name)
+    }));
+    names.sort();
+    names.dedup();
     let encoder = GzEncoder::new(File::create(&file).map_err(fail)?, Compression::default());
     let mut archive = tar::Builder::new(encoder);
-    let mut files = Vec::new();
-    collect(dir, dir, &mut files).map_err(|err| format!("{}: {err}", dir.display()))?;
-    files.sort();
-    for (name, path) in files {
-        archive.append_path_with_name(&path, &name).map_err(fail)?;
+    for name in names {
+        let path = dir.join(&name);
+        archive
+            .append_path_with_name(&path, &name)
+            .map_err(|err| format!("{}: {err}", path.display()))?;
     }
     archive
         .into_inner()
         .and_then(|encoder| encoder.finish())
         .map_err(fail)?;
     Ok(file)
-}
-
-/// The files under `dir`, with their paths relative to `root` using `/`.
-fn collect(root: &Path, dir: &Path, files: &mut Vec<(String, PathBuf)>) -> io::Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            collect(root, &path, files)?;
-        } else {
-            let relative = path.strip_prefix(root).expect("under root");
-            let name: Vec<_> = relative.iter().map(|p| p.to_string_lossy()).collect();
-            files.push((name.join("/"), path));
-        }
-    }
-    Ok(())
 }
 
 /// Unpacks `archive` into `dest`. Only plain files and directories inside
@@ -596,12 +596,20 @@ mod tests {
         fs::write(
             dir.join("plugin.toml"),
             format!(
-                "name = \"{name}\"\nversion = \"{version}\"\napi = \"{api}\"\ncapabilities = [{capabilities}]\n"
+                "name = \"{name}\"\nversion = \"{version}\"\napi = \"{api}\"\ncapabilities = [{capabilities}]\n\
+                 [[languages]]\nname = \"x\"\nfile-types = [\"x\"]\ngrammar = \"x.wasm\"\n\
+                 [languages.queries]\nhighlights = \"queries/a.scm\"\n"
             ),
         )
         .unwrap();
         fs::write(dir.join("plugin.wasm"), b"\0asm").unwrap();
+        fs::write(dir.join("x.wasm"), b"\0asm").unwrap();
         fs::write(dir.join("queries/a.scm"), "(x)").unwrap();
+        fs::write(dir.join("LICENSE-MIT"), "MIT").unwrap();
+        // Sources and build output stay out of the archive.
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join("src/lib.rs"), "").unwrap();
+        fs::write(dir.join("Cargo.toml"), "").unwrap();
         dir
     }
 
@@ -622,6 +630,8 @@ mod tests {
             fs::read_to_string(dest.join("queries/a.scm")).unwrap(),
             "(x)"
         );
+        assert!(dest.join("x.wasm").is_file() && dest.join("LICENSE-MIT").is_file());
+        assert!(!dest.join("src").exists() && !dest.join("Cargo.toml").exists());
         assert_eq!(read_manifest(&dest).unwrap().name, "foo");
     }
 

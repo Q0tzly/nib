@@ -46,6 +46,9 @@ pub struct PluginManifest {
     pub events: Vec<String>,
     /// The languages it provides.
     pub languages: Vec<String>,
+    /// The files of its languages, grammars and queries, by path in its
+    /// directory.
+    pub language_files: Vec<String>,
     /// It has code to run, not only data such as languages.
     pub has_code: bool,
 }
@@ -59,6 +62,12 @@ pub fn read_manifest(dir: &Path) -> Result<PluginManifest, Error> {
         api: manifest.api,
         capabilities: manifest.capabilities,
         events: manifest.events,
+        language_files: manifest
+            .languages
+            .iter()
+            .flat_map(|l| std::iter::once(&l.grammar).chain(l.queries.values()))
+            .cloned()
+            .collect(),
         languages: manifest.languages.into_iter().map(|l| l.name).collect(),
         has_code: dir.join("plugin.wasm").is_file(),
     })

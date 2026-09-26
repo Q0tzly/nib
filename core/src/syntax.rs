@@ -6,6 +6,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, mpsc};
 use std::thread;
 
 use ropey::Rope;
@@ -16,6 +17,7 @@ use tree_sitter::{
 };
 use wasmtime::{Cache, CacheConfig, Config, Engine};
 
+use crate::background::Inbox;
 use crate::grid::Style;
 use crate::ui::Theme;
 
@@ -23,9 +25,90 @@ pub(crate) struct Languages {
     /// Created with the first grammar. Unlike the plugin engine, it has no
     /// epoch interruption, which tree-sitter's stores do not expect.
     engine: Option<Engine>,
+    /// For loading grammars, and for what the main thread parses: injected
+    /// layers, and trees the syntax API needs before the thread is done.
     parser: Parser,
     list: Vec<Entry>,
     pub cache_dir: Option<PathBuf>,
+    /// Set when buffers are parsed on the syntax thread, to wake the main
+    /// loop when a tree is ready (docs/architecture.md, "解析のスレッド").
+    background: Option<Arc<Inbox>>,
+    /// Started with the first parse it gets.
+    worker: Option<Worker>,
+    last_job: u64,
+}
+
+/// The syntax thread: it parses what it is sent, one job after another.
+struct Worker {
+    jobs: mpsc::Sender<Job>,
+    done: mpsc::Receiver<Done>,
+}
+
+struct Job {
+    id: u64,
+    language: Language,
+    text: Rope,
+    old: Option<Tree>,
+}
+
+pub(crate) struct Done {
+    id: u64,
+    tree: Option<Tree>,
+}
+
+impl Done {
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+impl Worker {
+    fn start(engine: &Engine, inbox: Arc<Inbox>) -> Result<Self, String> {
+        // A store of its own: languages loaded in the main thread's store
+        // are added to this one when first used.
+        let mut parser = Parser::new();
+        let store = WasmStore::new(engine).map_err(|err| err.to_string())?;
+        parser
+            .set_wasm_store(store)
+            .map_err(|err| err.to_string())?;
+        let (jobs, job_queue) = mpsc::channel::<Job>();
+        let (finished, done) = mpsc::channel();
+        thread::Builder::new()
+            .name("nib-syntax".into())
+            .spawn(move || {
+                for job in job_queue {
+                    let tree =
+                        parse_text(&mut parser, &job.language, &[], &job.text, job.old.as_ref());
+                    if finished.send(Done { id: job.id, tree }).is_err() {
+                        return;
+                    }
+                    inbox.wake();
+                }
+            })
+            .map_err(|err| err.to_string())?;
+        Ok(Self { jobs, done })
+    }
+}
+
+/// Parses `ranges` of `text` (all of it if there are none), reusing `old`.
+fn parse_text(
+    parser: &mut Parser,
+    language: &Language,
+    ranges: &[TsRange],
+    text: &Rope,
+    old: Option<&Tree>,
+) -> Option<Tree> {
+    if parser.set_language(language).is_err() || parser.set_included_ranges(ranges).is_err() {
+        return None;
+    }
+    let mut read = |byte: usize, _: Point| -> &[u8] {
+        if byte >= text.len_bytes() {
+            return &[];
+        }
+        let (chunk, start, _, _) = text.chunk_at_byte(byte);
+        &chunk.as_bytes()[byte - start..]
+    };
+    parser.parse_with_options(&mut read, old, None)
 }
 
 struct Entry {
@@ -87,6 +170,13 @@ pub(crate) struct BufferSyntax {
     pub dirty: bool,
     /// Where the text changed since the last parse.
     edited: Option<Range<usize>>,
+    /// The last tree the injections were brought up to date with, moved
+    /// along with the edits since, to find where they may have changed.
+    base: Option<Tree>,
+    /// The parse under way on the syntax thread, and the edits since it
+    /// started, to apply to its tree.
+    job: Option<u64>,
+    since_job: Vec<InputEdit>,
     injections: Injections,
     /// The first parse leaves injections for later, so a file just opened
     /// shows the colors of its own language sooner.
@@ -232,6 +322,9 @@ impl Default for Languages {
             parser: Parser::new(),
             list: Vec::new(),
             cache_dir: None,
+            background: None,
+            worker: None,
+            last_job: 0,
         }
     }
 }
@@ -372,12 +465,119 @@ impl Languages {
     /// parts that did not change, and the languages injected into it. Loads
     /// grammars first if needed.
     pub fn parse(&mut self, syntax: &mut BufferSyntax, text: &Rope) -> Result<(), String> {
-        let old = syntax.tree.take();
-        syntax.tree = self.parse_in(syntax.language, text, &[], old.as_ref())?;
+        let tree = self.parse_in(syntax.language, text, &[], syntax.tree.as_ref())?;
+        // This overtakes a parse on the syntax thread; its tree is dropped.
+        syntax.job = None;
+        syntax.since_job.clear();
+        self.take_tree(syntax, tree, text);
+        Ok(())
+    }
+
+    /// Whether buffers are parsed on the syntax thread.
+    pub fn in_background(&self) -> bool {
+        self.background.is_some()
+    }
+
+    /// Parses on the syntax thread, waking `inbox`'s loop when a tree is
+    /// ready, or on the main thread again if `None`.
+    pub fn set_background(&mut self, inbox: Option<Arc<Inbox>>) {
+        self.background = inbox;
+        self.worker = None;
+    }
+
+    /// Sends the buffer to the syntax thread if it changed since its last
+    /// parse and no parse of it is under way.
+    pub fn start_parse(&mut self, syntax: &mut BufferSyntax, text: &Rope) -> Result<(), String> {
+        if !syntax.dirty || syntax.job.is_some() {
+            return Ok(());
+        }
+        self.ensure_loaded(syntax.language)?;
+        let EntryState::Loaded { language, .. } = &self.list[syntax.language].state else {
+            unreachable!("loaded above");
+        };
+        let language = language.clone();
+        if self.worker.is_none() {
+            let engine = self.engine.as_ref().expect("made when the grammar loaded");
+            let inbox = self
+                .background
+                .clone()
+                .ok_or("not parsing in the background")?;
+            self.worker = Some(Worker::start(engine, inbox)?);
+        }
+        self.last_job += 1;
+        let job = Job {
+            id: self.last_job,
+            language,
+            text: text.clone(),
+            old: syntax.tree.clone(),
+        };
+        let worker = self.worker.as_ref().expect("started above");
+        worker
+            .jobs
+            .send(job)
+            .map_err(|_| "the syntax thread stopped".to_string())?;
+        syntax.job = Some(self.last_job);
+        syntax.since_job.clear();
+        Ok(())
+    }
+
+    /// The parses the syntax thread has finished, after waiting for `job`
+    /// if it is given.
+    pub fn finished(&mut self, job: Option<u64>) -> Vec<Done> {
+        let Some(worker) = &self.worker else {
+            return Vec::new();
+        };
+        let mut done: Vec<Done> = worker.done.try_iter().collect();
+        if let Some(job) = job {
+            while !done.iter().any(|d| d.id == job) {
+                match worker.done.recv() {
+                    Ok(finished) => done.push(finished),
+                    Err(_) => break,
+                }
+            }
+        }
+        done
+    }
+
+    /// Takes a parse the syntax thread finished for `syntax`. Returns
+    /// whether the tree is now up to date: when the text changed during
+    /// the parse, the changes are applied to the new tree, and it waits for
+    /// the next one.
+    pub fn take_parse(
+        &mut self,
+        syntax: &mut BufferSyntax,
+        done: Done,
+        text: &Rope,
+    ) -> Result<bool, String> {
+        syntax.job = None;
+        self.finish_loading(syntax.language)?;
+        let Some(mut tree) = done.tree else {
+            return Err(format!(
+                "{} could not be parsed",
+                self.list[syntax.language].name
+            ));
+        };
+        if syntax.since_job.is_empty() {
+            self.take_tree(syntax, Some(tree), text);
+            return Ok(true);
+        }
+        for edit in syntax.since_job.drain(..) {
+            tree.edit(&edit);
+        }
+        syntax.tree = Some(tree);
+        Ok(false)
+    }
+
+    /// Takes `tree`, parsed from the text as it is now, and brings the
+    /// injections up to date with what changed since the last such tree.
+    fn take_tree(&mut self, syntax: &mut BufferSyntax, tree: Option<Tree>, text: &Rope) {
+        let old = syntax.base.take();
+        syntax.tree = tree;
+        syntax.base = syntax.tree.clone();
         syntax.dirty = false;
         let edited = syntax.edited.take();
         if syntax.injections_pending {
-            return Ok(());
+            return;
         }
         match &syntax.tree {
             Some(tree) => {
@@ -392,7 +592,6 @@ impl Languages {
             }
             None => syntax.injections = Injections::default(),
         }
-        Ok(())
     }
 
     /// Finds the injections the first parse left for later, then parses
@@ -494,19 +693,7 @@ impl Languages {
         let EntryState::Loaded { language, .. } = &self.list[id].state else {
             unreachable!("loaded above");
         };
-        if self.parser.set_language(language).is_err()
-            || self.parser.set_included_ranges(ranges).is_err()
-        {
-            return Ok(None);
-        }
-        let mut read = |byte: usize, _: Point| -> &[u8] {
-            if byte >= text.len_bytes() {
-                return &[];
-            }
-            let (chunk, start, _, _) = text.chunk_at_byte(byte);
-            &chunk.as_bytes()[byte - start..]
-        };
-        let tree = self.parser.parse_with_options(&mut read, old, None);
+        let tree = parse_text(&mut self.parser, language, ranges, text, old);
         self.finish_loading(id)?;
         Ok(tree)
     }
@@ -1086,6 +1273,9 @@ impl BufferSyntax {
             tree: None,
             dirty: true,
             edited: None,
+            base: None,
+            job: None,
+            since_job: Vec::new(),
             injections: Injections::default(),
             injections_pending: true,
         }
@@ -1102,8 +1292,11 @@ impl BufferSyntax {
             old_end_position: point(old, old_end),
             new_end_position: point(new, new_end),
         };
-        if let Some(tree) = &mut self.tree {
+        for tree in [&mut self.tree, &mut self.base].into_iter().flatten() {
             tree.edit(&edit);
+        }
+        if self.job.is_some() {
+            self.since_job.push(edit);
         }
         edit_injections(&mut self.injections, &edit);
         self.edited = Some(match self.edited.take() {
@@ -1117,6 +1310,18 @@ impl BufferSyntax {
         self.dirty = true;
     }
 
+    /// The parse of this buffer under way on the syntax thread.
+    pub fn job(&self) -> Option<u64> {
+        self.job
+    }
+
+    /// Stops waiting for the parse under way, as when the thread is gone.
+    /// The text still counts as changed, so it is parsed again.
+    pub fn forget_job(&mut self) {
+        self.job = None;
+        self.since_job.clear();
+    }
+
     pub fn injections_pending(&self) -> bool {
         self.injections_pending
     }
@@ -1124,6 +1329,9 @@ impl BufferSyntax {
     /// Drops the trees when an edit cannot be described, e.g. after undo.
     pub fn invalidate(&mut self) {
         self.tree = None;
+        self.base = None;
+        self.job = None;
+        self.since_job.clear();
         self.edited = None;
         self.injections = Injections::default();
         self.dirty = true;

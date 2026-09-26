@@ -114,6 +114,7 @@ A plugin gets the kinds of events listed under `events` in its manifest:
 | `buffer-opened`, `buffer-saved` | A buffer was opened, saved. Buffers opened before the plugin loaded are announced after it does |
 | `buffer-changed` | A buffer changed. The changes come in the order that turns the old text into the new, each with its line and column, as LSP's `didChange` wants them |
 | `<plugin>.<name>` | A plugin called `events.emit(name, json)`. `helix.mode_changed` tells when the Helix keymap changes modes |
+| `editor.syntax_updated` | A buffer's syntax tree caught up with its edits: `{"path": …, "version": …}`. The core emits it |
 
 These come to the plugin that asked for them, without being listed: `timer` (from `timers.set`), `process-output` and `process-exit` (from `process.spawn`), and `files-listed` (from `files.walk`).
 
@@ -139,6 +140,8 @@ Text is a list of spans, each with a style named after the theme (`"keyword"`, `
 ### Syntax
 
 The core parses buffers with tree-sitter, and plugins read the trees: `syntax.node-at`, `parent`, `children`, and `captures`, which runs one of the language's queries (`"textobjects"`, say) over a range. Answers are always up to date, even right after an edit in the same call. Buffers without a language answer with nothing, so fall back to working on text.
+
+nib parses on a thread of its own, so an answer right after an edit waits for that parse. For what a plugin reads on every key, such as the bracket to highlight, read the tree when `editor.syntax_updated` comes instead, as the Helix keymap does after keys that change text.
 
 ### And more
 

@@ -575,3 +575,85 @@ fn layers_far_from_the_screen_wait_until_it_comes() {
     assert_eq!(fg(&editor, 0, row.unwrap() as u16), KEYWORD);
     fs::remove_file(&path).unwrap();
 }
+
+fn settle_in_background(editor: &mut Editor) {
+    loop {
+        editor.wait_for_syntax();
+        if !editor.catch_up() {
+            break;
+        }
+    }
+}
+
+#[test]
+fn parses_in_the_background() {
+    let path = env::temp_dir().join(format!("nib-{}-background.rs", std::process::id()));
+    fs::write(&path, "fn main() {}\nfn other() {}\n").unwrap();
+    let mut editor = Editor::default();
+    editor.set_background_parsing(true);
+    editor.open(&path).unwrap();
+    editor.load_plugin(&plugin_dir("helix")).unwrap();
+    editor.load_plugin(&plugin_dir("rust")).unwrap();
+    editor.resize(40, 6);
+    settle_in_background(&mut editor);
+    assert_eq!(fg(&editor, 0, 0), KEYWORD);
+
+    type_keys(&mut editor, "i// x<ret><esc>");
+    settle_in_background(&mut editor);
+    assert_eq!(fg(&editor, 0, 0), COMMENT);
+    assert_eq!(fg(&editor, 0, 1), KEYWORD);
+    assert_eq!(fg(&editor, 3, 2), FUNCTION);
+
+    // Undo is an edit too.
+    type_keys(&mut editor, "u");
+    settle_in_background(&mut editor);
+    assert_eq!(fg(&editor, 0, 0), KEYWORD);
+    fs::remove_file(&path).unwrap();
+}
+
+/// Keys typed while the syntax thread parses change the text under it;
+/// the tree it returns has them applied, then is parsed again. In the end
+/// the colors are those of a tree parsed from the final text.
+#[test]
+fn edits_during_a_parse_are_applied_to_its_tree() {
+    let source: String = (0..3000)
+        .map(|i| format!("fn f{i}(a: u8) -> u8 {{ a + {i} }} // n\n"))
+        .collect();
+    let path = env::temp_dir().join(format!("nib-{}-replay.rs", std::process::id()));
+    fs::write(&path, &source).unwrap();
+    let open = |background: bool| {
+        let mut editor = Editor::default();
+        editor.set_background_parsing(background);
+        editor.open(&path).unwrap();
+        editor.load_plugin(&plugin_dir("helix")).unwrap();
+        editor.load_plugin(&plugin_dir("rust")).unwrap();
+        editor.resize(60, 20);
+        editor
+    };
+    let mut background = open(true);
+    settle_in_background(&mut background);
+    // Each key starts or extends a parse of 3,000 lines, so later keys
+    // land while one runs.
+    type_keys(&mut background, "jjwwi/* <esc>jji\"<esc>kkA x */<esc>");
+    let text = background.buffer().text().to_string();
+    settle_in_background(&mut background);
+
+    let mut foreground = open(false);
+    let edited = env::temp_dir().join(format!("nib-{}-replay-final.rs", std::process::id()));
+    fs::write(&edited, &text).unwrap();
+    foreground.open(&edited).unwrap();
+    foreground.view_mut().selection = background.view().selection.clone();
+    while foreground.catch_up() {}
+
+    let styles = |editor: &Editor| {
+        let mut grid = Grid::default();
+        editor.render(&mut grid);
+        (0..grid.height() - 2)
+            .flat_map(|y| (0..grid.width()).map(move |x| (x, y)))
+            .map(|(x, y)| grid.cell(x, y).style.fg)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(styles(&background), styles(&foreground));
+    fs::remove_file(&path).unwrap();
+    fs::remove_file(&edited).unwrap();
+}

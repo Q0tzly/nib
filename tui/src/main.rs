@@ -48,6 +48,7 @@ fn main() -> ExitCode {
     }
 
     let mut editor = Editor::default();
+    editor.set_background_parsing(true);
     // Without one, as over SSH with no display, plugins get a clipboard
     // inside the editor.
     if let Some(system) = clipboard::System::new() {

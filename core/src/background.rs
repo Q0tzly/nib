@@ -38,6 +38,12 @@ pub(crate) struct Inbox {
 impl Inbox {
     pub fn push(&self, message: Message) {
         self.messages.lock().expect("inbox lock").push_back(message);
+        self.wake();
+    }
+
+    /// Wakes the main loop for work that brings its result another way,
+    /// as the syntax thread does with its trees.
+    pub fn wake(&self) {
         if let Some(waker) = &*self.waker.lock().expect("waker lock") {
             waker();
         }

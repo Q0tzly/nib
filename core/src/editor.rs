@@ -134,10 +134,17 @@ impl State {
     /// the languages injected into them on the screen. Hidden buffers wait
     /// until they are shown. Returns whether the colors may have changed.
     pub fn update_syntax(&mut self) -> bool {
-        let mut changed = false;
+        // Trees the syntax thread finished, for hidden buffers too.
+        let mut fresh = self.take_parses(None);
+        let mut changed = !fresh.is_empty();
         for index in self.shown_buffers() {
-            let parsed = self.parse(index);
-            changed |= parsed;
+            if self.languages.in_background() {
+                self.start_parse(index);
+            } else if self.parse(index) {
+                fresh.push(index);
+                changed = true;
+            }
+            let parsed = fresh.contains(&index);
             let screen = self.screen_of(index, 0);
             let buffer = &mut self.buffers[index];
             let text = buffer.text().clone();
@@ -211,6 +218,82 @@ impl State {
         true
     }
 
+    /// Asks the syntax thread to parse buffer `index` if it changed.
+    fn start_parse(&mut self, index: usize) {
+        let buffer = &mut self.buffers[index];
+        let text = buffer.text().clone();
+        let Some(syntax) = &mut buffer.syntax else {
+            return;
+        };
+        if let Err(err) = self.languages.start_parse(syntax, &text) {
+            buffer.syntax = None;
+            self.message = Some(format!("syntax: {err}"));
+        }
+    }
+
+    /// Takes the trees the syntax thread finished, after waiting for `job`
+    /// if given. Returns the buffers whose trees are now up to date.
+    fn take_parses(&mut self, job: Option<u64>) -> Vec<usize> {
+        let mut fresh = Vec::new();
+        for done in self.languages.finished(job) {
+            // Parses of buffers since closed or parsed again are dropped.
+            let Some(index) = self.buffers.iter().position(|b| {
+                b.syntax
+                    .as_ref()
+                    .is_some_and(|s| s.job() == Some(done.id()))
+            }) else {
+                continue;
+            };
+            let buffer = &mut self.buffers[index];
+            let text = buffer.text().clone();
+            let syntax = buffer.syntax.as_mut().expect("found by its job");
+            match self.languages.take_parse(syntax, done, &text) {
+                Ok(true) => fresh.push(index),
+                Ok(false) => {}
+                Err(err) => {
+                    buffer.syntax = None;
+                    self.message = Some(format!("syntax: {err}"));
+                }
+            }
+        }
+        for &index in &fresh {
+            self.syntax_updated(index);
+        }
+        fresh
+    }
+
+    /// Waits until the syntax thread has parsed every shown buffer up to
+    /// its text, sending the parses still needed.
+    pub fn wait_for_parses(&mut self) {
+        loop {
+            let under_way = self
+                .buffers
+                .iter()
+                .find_map(|b| b.syntax.as_ref().and_then(|s| s.job()));
+            if let Some(job) = under_way {
+                self.take_parses(Some(job));
+                // No tree came: the thread is gone. Parse on this one.
+                for syntax in self.buffers.iter_mut().filter_map(|b| b.syntax.as_mut()) {
+                    if syntax.job() == Some(job) {
+                        syntax.forget_job();
+                        self.languages.set_background(None);
+                    }
+                }
+                continue;
+            }
+            for index in self.shown_buffers() {
+                self.start_parse(index);
+            }
+            let started = self
+                .buffers
+                .iter()
+                .any(|b| b.syntax.as_ref().is_some_and(|s| s.job().is_some()));
+            if !started {
+                return;
+            }
+        }
+    }
+
     /// Tells plugins that buffer `index` has an up-to-date tree, so what
     /// they read from it on every key can wait for this instead of for a
     /// parse (docs/plugin-api.md).
@@ -236,6 +319,11 @@ impl State {
         index: usize,
         f: impl FnOnce(&mut Languages, usize, &Tree, &Rope) -> R,
     ) -> Option<R> {
+        // The parse under way is likely nearly done; parse here only if
+        // the text changed again meanwhile.
+        if let Some(job) = self.buffers[index].syntax.as_ref().and_then(|s| s.job()) {
+            self.take_parses(Some(job));
+        }
         self.parse(index);
         let buffer = &self.buffers[index];
         let syntax = buffer.syntax.as_ref()?;
@@ -744,6 +832,26 @@ impl Editor {
     /// Does work left for after a frame, such as the first parse of a
     /// buffer, so opening a file shows it before its highlighting. Returns
     /// whether the screen needs drawing again.
+    /// Parses buffers on a thread of their own, as the terminal does, so
+    /// keys and frames never wait for a tree (docs/architecture.md, "解析の
+    /// スレッド"). Off by default: each key then leaves the trees up to
+    /// date, as tests want.
+    pub fn set_background_parsing(&mut self, on: bool) {
+        let state = self.state_mut();
+        let inbox = on.then(|| state.inbox.clone());
+        state.languages.set_background(inbox);
+        // Parses sent to a thread now gone never come back.
+        for syntax in state.buffers.iter_mut().filter_map(|b| b.syntax.as_mut()) {
+            syntax.forget_job();
+        }
+    }
+
+    /// Waits for the syntax thread to parse the shown buffers, for tests.
+    /// `catch_up` then takes the trees in as the frontend's loop would.
+    pub fn wait_for_syntax(&mut self) {
+        self.state_mut().wait_for_parses();
+    }
+
     pub fn catch_up(&mut self) -> bool {
         let delivered = self.deliver_events();
         if delivered {

@@ -290,23 +290,35 @@ impl editor::HostView for PluginData {
             };
             buffer.apply(base_version, edits, &state.view.selection, after, mode)
         })();
-        let result = result.map(|change| state.view.selection = change.selection);
+        let index = state.view.buffer;
+        let result = result.map(|change| {
+            state.sync_views(index, &change.changes);
+            state.view.selection = change.selection;
+        });
         wit_result(result)
     }
 
     fn undo(&mut self, view: Resource<ViewHandle>) -> HostResult<bool> {
         let state = self.view_state(&view)?;
-        let change = state.buffers[state.view.buffer].undo();
+        let index = state.view.buffer;
+        let change = state.buffers[index].undo();
         Ok(change
-            .map(|change| state.view.selection = change.selection)
+            .map(|change| {
+                state.sync_views(index, &change.changes);
+                state.view.selection = change.selection;
+            })
             .is_some())
     }
 
     fn redo(&mut self, view: Resource<ViewHandle>) -> HostResult<bool> {
         let state = self.view_state(&view)?;
-        let change = state.buffers[state.view.buffer].redo();
+        let index = state.view.buffer;
+        let change = state.buffers[index].redo();
         Ok(change
-            .map(|change| state.view.selection = change.selection)
+            .map(|change| {
+                state.sync_views(index, &change.changes);
+                state.view.selection = change.selection;
+            })
             .is_some())
     }
 

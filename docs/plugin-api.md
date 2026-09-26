@@ -223,7 +223,7 @@ interface syntax {
   - 呼び出し先がすでに呼び出し中のプラグイン（呼び出し元自身や、その呼び出し元）なら、再入になるのでエラーを返す。
   - 呼び出し先のプラグインが落ちたときは、呼び出し元にはエラーが返る。落ちたプラグインの再起動は、いちばん外側の呼び出しが終わってから行う。
 - `commands.all()` で、登録済みのコマンドの名前と説明を得る（コマンドの一覧や補完に使う）。
-- コアのコマンドの例: `buffer.open`、`buffer.save`、`buffer.close`、`editor.quit`、`view.split`。
+- コアのコマンドの例: `buffer.open`、`buffer.save`、`buffer.close`、`editor.quit`、`view.split`（分割表示のコマンドは [architecture.md](architecture.md) の「分割表示」）。
 
 呼び出しを同期にできるのは、呼び出し中はエディタの状態とプラグインの一覧をそのプラグインのストアに貸しているため。呼び出し先のプラグインへは、貸したものをそのまま又貸しする（[architecture.md](architecture.md) の「プラグインの実行」）。
 

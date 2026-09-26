@@ -2,10 +2,13 @@ use std::borrow::Cow;
 
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::buffer::Buffer;
 use crate::editor::{Editor, Menu};
 use crate::grid::{Cursor, CursorShape, Grid, Style, display_width};
 use crate::layout;
 use crate::ui::{Panel, PopupAnchor, Side, Span, StyledLine, Theme};
+use crate::view::View;
+use crate::windows::{Rect, Separator};
 
 impl Editor {
     /// Draws the editor into `grid`, resizing it to the editor size.
@@ -18,7 +21,7 @@ impl Editor {
         }
         let text_rows = self.text_rows();
         let status_row = (height > 1).then(|| height - 1);
-        let mut cursor = self.render_text(grid, text_rows);
+        let mut cursor = self.render_views(grid, text_rows);
         self.render_popups(grid, text_rows);
         let panel_end = status_row.unwrap_or(height);
         if let Some(panel_cursor) = self.render_panels(grid, text_rows, panel_end) {
@@ -30,10 +33,10 @@ impl Editor {
         cursor
     }
 
-    /// Rows left for text above the panels and the status line.
+    /// Rows left for the views above the panels and the status line.
     pub(crate) fn text_rows(&self) -> u16 {
         let menu = self.menu_lines().len().min(u16::MAX as usize) as u16;
-        self.state().text_rows().saturating_sub(menu)
+        self.state().text_area_rows().saturating_sub(menu)
     }
 
     /// The plugin list shown while the core menu is open, below any panels.
@@ -125,11 +128,60 @@ impl Editor {
         cursor
     }
 
-    fn render_text(&self, grid: &mut Grid, rows: u16) -> Option<Cursor> {
-        let width = u32::from(grid.width());
-        let tab_width = u32::from(self.state().tab_width(self.view().buffer));
-        let text = self.buffer().text();
-        let view = self.view();
+    /// Draws every view in its part of the top `rows` rows, and the lines
+    /// between them. Returns the focused view's cursor.
+    fn render_views(&self, grid: &mut Grid, rows: u16) -> Option<Cursor> {
+        let state = self.state();
+        let (rects, separators) = state.view_layout(rows);
+        let mut cursor = None;
+        for (id, rect) in rects {
+            let focused = id == state.focused;
+            let drawn = self.render_view(grid, state.view_by_id(id), rect, focused);
+            if focused {
+                cursor = drawn;
+            }
+        }
+        let style = state.theme.style("ui.window").unwrap_or_default();
+        for separator in separators {
+            match separator {
+                Separator::Column { x, y, height } => {
+                    for row in y..y + height {
+                        grid.put_grapheme(x, row, "│", style);
+                    }
+                }
+                // The name of the view above.
+                Separator::Row { x, y, width, view } => {
+                    let buffer = &state.buffers[state.view_by_id(view).buffer];
+                    let name = buffer
+                        .path()
+                        .map_or("[scratch]".into(), |p| p.display().to_string());
+                    let end = x + width;
+                    let mut at = put_clipped(grid, x, y, "── ", style, end);
+                    at = put_clipped(grid, at, y, &name, style, end);
+                    at = put_clipped(grid, at, y, " ", style, end);
+                    while at < end {
+                        at = grid.put_grapheme(at, y, "─", style);
+                    }
+                }
+            }
+        }
+        cursor
+    }
+
+    /// Draws `view` in `rect`. Returns its cursor if it is `focused`.
+    fn render_view(
+        &self,
+        grid: &mut Grid,
+        view: &View,
+        rect: Rect,
+        focused: bool,
+    ) -> Option<Cursor> {
+        let rows = rect.height;
+        let width = u32::from(rect.width);
+        let tab_width = u32::from(self.state().tab_width(view.buffer));
+        let buffer = &self.state().buffers[view.buffer];
+        let text = buffer.text();
+        let at = |x: u16, row: u16| (rect.x + x, rect.y + row);
         let ranges = view.selection.ranges();
         let selected = |offset: usize| {
             let i = ranges.partition_point(|range| range.to() <= offset);
@@ -143,12 +195,13 @@ impl Editor {
             .unwrap_or(normal)
             .bg;
         let visible_start = text.line_to_byte(view.top_line.min(text.len_lines() - 1));
-        let visible_end = self
-            .buffer()
+        let visible_end = buffer
             .line_start(view.top_line + rows as usize)
             .unwrap_or(text.len_bytes());
-        let syntax = self.state().syntax_styles(visible_start..visible_end);
-        let decorations = self.decoration_styles(visible_start..visible_end);
+        let syntax = self
+            .state()
+            .syntax_styles(view.buffer, visible_start..visible_end);
+        let decorations = self.decoration_styles(buffer, visible_start..visible_end);
         let style_at = |offset: usize| {
             let at = |styles: &[Option<Style>]| {
                 styles
@@ -204,10 +257,12 @@ impl Editor {
                         let end = ((next - left).min(width)) as u16;
                         let mut x = x;
                         while x < end {
-                            x = grid.put_grapheme(x, row, " ", style);
+                            let (gx, gy) = at(x, row);
+                            x = grid.put_grapheme(gx, gy, " ", style) - rect.x;
                         }
                     } else {
-                        grid.put_grapheme(x, row, grapheme, style);
+                        let (gx, gy) = at(x, row);
+                        grid.put_grapheme(gx, gy, grapheme, style);
                     }
                 }
                 column = next;
@@ -220,37 +275,44 @@ impl Editor {
                     cursor = Some((x, row));
                 }
                 if offset < text.len_bytes() && selected(offset) {
-                    grid.put_grapheme(x, row, " ", style_at(offset));
+                    let (gx, gy) = at(x, row);
+                    grid.put_grapheme(gx, gy, " ", style_at(offset));
                 }
             }
             // Notes follow the text, when all of the line is drawn.
             if offset == line_start + line.len() {
-                let notes = &self.buffer().notes;
+                let notes = &buffer.notes;
                 let first = notes.partition_point(|note| note.at < line_start);
                 let mut x = (column + 2).saturating_sub(left);
+                let end = rect.x + rect.width;
                 for note in notes[first..].iter().take_while(|note| note.at <= offset) {
                     if x >= width {
                         break;
                     }
                     let style = self.state().theme.style(&note.style).unwrap_or(normal);
                     let text = note.text.lines().next().unwrap_or_default();
-                    x = u32::from(grid.put_str(x as u16, row, text, style)) + 2;
+                    let (gx, gy) = at(x as u16, row);
+                    x = u32::from(put_clipped(grid, gx, gy, text, style, end) - rect.x) + 2;
                 }
             }
         }
 
-        cursor.map(|(x, y)| Cursor {
-            x,
-            y,
+        cursor.filter(|_| focused).map(|(x, y)| Cursor {
+            x: rect.x + x,
+            y: rect.y + y,
             shape: view.cursor_shape,
         })
     }
 
-    /// The decoration style of each byte in `range` of the shown buffer.
-    fn decoration_styles(&self, range: std::ops::Range<usize>) -> Vec<Option<Style>> {
+    /// The decoration style of each byte in `range` of `buffer`.
+    fn decoration_styles(
+        &self,
+        buffer: &Buffer,
+        range: std::ops::Range<usize>,
+    ) -> Vec<Option<Style>> {
         let theme = &self.state().theme;
         let mut styles: Vec<Option<Style>> = vec![None; range.len()];
-        let decorations = &self.buffer().decorations;
+        let decorations = &buffer.decorations;
         let first = decorations.partition_point(|d| d.range.start < range.start);
         // Decorations starting before the range may still reach into it;
         // they are few, so scan them all.
@@ -292,7 +354,7 @@ impl Editor {
                     if buffer != state.view.buffer {
                         continue;
                     }
-                    let Some((column, row)) = self.screen_position(offset, rows, width) else {
+                    let Some((column, row)) = self.screen_position(offset, rows) else {
                         continue;
                     };
                     let y = if row + 1 + h <= rows || row < h {
@@ -319,17 +381,19 @@ impl Editor {
         }
     }
 
-    /// Where `offset` of the shown buffer is drawn in the top `rows` rows,
-    /// if it is on screen.
-    fn screen_position(&self, offset: usize, rows: u16, width: u16) -> Option<(u16, u16)> {
+    /// Where `offset` of the focused view's buffer is drawn, if it is in
+    /// that view, with the views in the top `rows` rows.
+    fn screen_position(&self, offset: usize, rows: u16) -> Option<(u16, u16)> {
         let text = self.buffer().text();
         let view = self.view();
+        let rect = self.state().focused_rect(rows);
         // On a char boundary, in case the text changed under the offset.
         let offset = text.char_to_byte(text.byte_to_char(offset.min(text.len_bytes())));
         let row = text.byte_to_line(offset).checked_sub(view.top_line)?;
         let column = layout::column_of(text, offset, self.state().tab_width(view.buffer))
             .checked_sub(view.left_col)?;
-        (row < rows as usize && column < u32::from(width)).then_some((column as u16, row as u16))
+        let inside = row < rect.height as usize && column < u32::from(rect.width);
+        inside.then_some((rect.x + column as u16, rect.y + row as u16))
     }
 
     fn render_status(&self, grid: &mut Grid, y: u16) {
@@ -466,6 +530,18 @@ fn put_line(grid: &mut Grid, theme: &Theme, mut x: u16, y: u16, line: &[Span], b
             .style(&span.style)
             .map_or(base, |style| base.patch(style));
         x = grid.put_str(x, y, &span.text, style);
+    }
+    x
+}
+
+/// Puts `text` from `x`, stopping before column `end`. Returns the column
+/// after the last grapheme put.
+fn put_clipped(grid: &mut Grid, mut x: u16, y: u16, text: &str, style: Style, end: u16) -> u16 {
+    for grapheme in text.graphemes(true) {
+        if x + display_width(grapheme) > end {
+            break;
+        }
+        x = grid.put_grapheme(x, y, grapheme, style);
     }
     x
 }

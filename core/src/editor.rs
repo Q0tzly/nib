@@ -19,13 +19,22 @@ use crate::process::Processes;
 use crate::syntax::{BufferSyntax, Languages};
 use crate::ui::{Panel, Popup, StatusItem, Theme};
 use crate::view::View;
+use crate::windows::{self, Direction, Rect, Separator, Splits};
 use std::sync::Arc;
 
 /// Everything plugins can see and change. While a plugin runs, it is lent to
 /// that plugin's store so host functions can reach it.
 pub(crate) struct State {
     pub buffers: Vec<Buffer>,
+    /// The focused view, which takes the keys.
     pub view: View,
+    /// Its id in `tree`.
+    pub focused: u32,
+    /// The other views, by id.
+    pub others: Vec<(u32, View)>,
+    /// How the views share the screen.
+    pub splits: Splits,
+    pub last_view_id: u32,
     pub width: u16,
     pub height: u16,
     pub quit: bool,
@@ -119,7 +128,15 @@ impl State {
     /// Parses the shown buffer if it changed since the last parse. Hidden
     /// buffers wait until they are shown. Returns whether it parsed.
     pub fn update_syntax(&mut self) -> bool {
-        self.parse(self.view.buffer)
+        let mut shown: Vec<usize> = self.others.iter().map(|(_, v)| v.buffer).collect();
+        shown.push(self.view.buffer);
+        shown.sort_unstable();
+        shown.dedup();
+        let mut parsed = false;
+        for index in shown {
+            parsed |= self.parse(index);
+        }
+        parsed
     }
 
     /// Parses buffer `index` if it changed since the last parse, loading its
@@ -169,9 +186,10 @@ impl State {
     /// has a parsed syntax tree.
     pub fn syntax_styles(
         &self,
+        index: usize,
         range: std::ops::Range<usize>,
     ) -> Option<Vec<Option<crate::grid::Style>>> {
-        let buffer = &self.buffers[self.view.buffer];
+        let buffer = &self.buffers[index];
         let syntax = buffer.syntax.as_ref()?;
         let tree = syntax.tree.as_ref()?;
         Some(
@@ -194,12 +212,113 @@ impl State {
     }
 
     /// Rows left for text above the panels and the status line.
-    pub fn text_rows(&self) -> u16 {
+    pub fn text_area_rows(&self) -> u16 {
         let status = u16::from(self.height > 1);
         let panels: usize = self.panels.iter().map(|p| p.lines.len()).sum();
         self.height
             .saturating_sub(status)
             .saturating_sub(panels.min(u16::MAX as usize) as u16)
+    }
+
+    /// Where the focused view is, in the rows for text that `rows` leaves.
+    pub fn focused_rect(&self, rows: u16) -> Rect {
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: self.width,
+            height: rows,
+        };
+        let (rects, _) = self.splits.layout(area);
+        rects
+            .into_iter()
+            .find(|(id, _)| *id == self.focused)
+            .map_or(area, |(_, rect)| rect)
+    }
+
+    /// The rows of the focused view.
+    pub fn text_rows(&self) -> u16 {
+        self.focused_rect(self.text_area_rows()).height
+    }
+
+    /// Where each view goes in the rows for text, and the lines between.
+    pub fn view_layout(&self, rows: u16) -> (Vec<(u32, Rect)>, Vec<Separator>) {
+        self.splits.layout(Rect {
+            x: 0,
+            y: 0,
+            width: self.width,
+            height: rows,
+        })
+    }
+
+    pub fn view_by_id(&self, id: u32) -> &View {
+        if id == self.focused {
+            return &self.view;
+        }
+        let (_, view) = self
+            .others
+            .iter()
+            .find(|(other, _)| *other == id)
+            .expect("views in the tree exist");
+        view
+    }
+
+    /// Makes view `id` the one taking keys.
+    pub fn focus(&mut self, id: u32) {
+        let Some(at) = self.others.iter().position(|(other, _)| *other == id) else {
+            return;
+        };
+        let (_, view) = self.others.remove(at);
+        let old = std::mem::replace(&mut self.view, view);
+        self.others.push((self.focused, old));
+        self.focused = id;
+    }
+
+    /// Splits the focused view in two, and focuses the new half.
+    pub fn split(&mut self, side_by_side: bool) {
+        self.last_view_id += 1;
+        let new = self.last_view_id;
+        self.splits.split(self.focused, new, side_by_side);
+        self.others.push((self.focused, self.view.clone()));
+        self.focused = new;
+    }
+
+    /// Closes the focused view, focusing the one before it.
+    pub fn close_view(&mut self) -> Result<(), String> {
+        let order = self.splits.leaves();
+        if order.len() == 1 {
+            return Err("the last view cannot be closed".into());
+        }
+        let at = order.iter().position(|id| *id == self.focused).unwrap_or(0);
+        let next = if at == 0 { order[1] } else { order[at - 1] };
+        let closed = self.focused;
+        self.focus(next);
+        self.others.retain(|(id, _)| *id != closed);
+        self.splits.remove(closed);
+        Ok(())
+    }
+
+    /// Closes every view but the focused one.
+    pub fn only_view(&mut self) {
+        self.others.clear();
+        self.splits = Splits::Leaf(self.focused);
+    }
+
+    /// Maps the selections of other views on buffer `index`, shown or
+    /// hidden, through `changes` the focused view made.
+    pub fn sync_views(&mut self, index: usize, changes: &[crate::ChangeSet]) {
+        if changes.is_empty() {
+            return;
+        }
+        let text = self.buffers[index].text();
+        let views = self
+            .others
+            .iter_mut()
+            .map(|(_, view)| view)
+            .chain(self.hidden_views.get_mut(&index))
+            .filter(|view| view.buffer == index);
+        for view in views {
+            view.selection = view.selection.map_all(changes, text);
+        }
     }
 
     /// From the start of the first line shown to the end of the last one.
@@ -257,6 +376,37 @@ impl State {
                 let count = self.buffers.len();
                 let step = if name == "buffer.next" { 1 } else { count - 1 };
                 self.switch_to((self.view.buffer + step) % count);
+            }
+            "view.split" => {
+                let side_by_side = match args["direction"].as_str() {
+                    Some("vertical") | None => true,
+                    Some("horizontal") => false,
+                    Some(other) => return Err(format!("view.split: no direction {other:?}")),
+                };
+                self.split(side_by_side);
+            }
+            "view.close" => self.close_view()?,
+            "view.only" => self.only_view(),
+            "view.focus" => {
+                let to = args["to"].as_str().unwrap_or("next");
+                let target = if to == "next" {
+                    let order = self.splits.leaves();
+                    let at = order.iter().position(|id| *id == self.focused).unwrap_or(0);
+                    Some(order[(at + 1) % order.len()])
+                } else {
+                    let direction = match to {
+                        "left" => Direction::Left,
+                        "right" => Direction::Right,
+                        "up" => Direction::Up,
+                        "down" => Direction::Down,
+                        other => return Err(format!("view.focus: no direction {other:?}")),
+                    };
+                    let (rects, _) = self.view_layout(self.text_area_rows());
+                    windows::neighbor(&rects, self.focused, direction)
+                };
+                if let Some(id) = target {
+                    self.focus(id);
+                }
             }
             "editor.quit" => {
                 let force = args["force"].as_bool().unwrap_or(false);
@@ -430,6 +580,16 @@ pub(crate) const CORE_COMMANDS: &[(&str, &str)] = &[
     ("buffer.next", "Show the next buffer"),
     ("buffer.previous", "Show the previous buffer"),
     (
+        "view.split",
+        "Split the view: {\"direction\": \"vertical\" or \"horizontal\"}",
+    ),
+    ("view.close", "Close the focused view"),
+    ("view.only", "Close every view but the focused one"),
+    (
+        "view.focus",
+        "Focus another view: {\"to\": \"next\", \"left\", \"right\", \"up\", or \"down\"}",
+    ),
+    (
         "editor.quit",
         "Quit; {\"force\": true} drops unsaved changes",
     ),
@@ -443,6 +603,10 @@ impl Default for Editor {
             state: Some(State {
                 buffers: vec![Buffer::default()],
                 view: View::new(0),
+                focused: 1,
+                others: Vec::new(),
+                splits: Splits::Leaf(1),
+                last_view_id: 1,
                 width: 0,
                 height: 0,
                 quit: false,
@@ -630,7 +794,8 @@ impl Editor {
     /// Scrolls the view so the cursor stays `scroll_margin` lines away from
     /// the top and bottom edges where possible.
     fn scroll_to_cursor(&mut self) {
-        let rows = self.text_rows() as usize;
+        let rect = self.state().focused_rect(self.text_rows());
+        let rows = rect.height as usize;
         let state = self.state_mut();
         if rows == 0 {
             return;
@@ -639,7 +804,7 @@ impl Editor {
         let cursor = state.view.cursor(text);
         let line = text.byte_to_line(cursor);
         let column = layout::column_of(text, cursor, state.tab_width(state.view.buffer));
-        let width = u32::from(state.width.max(1));
+        let width = u32::from(rect.width.max(1));
         let margin = (state.settings.scroll_margin as usize).min((rows - 1) / 2);
         let view = &mut state.view;
         if line < view.top_line + margin {

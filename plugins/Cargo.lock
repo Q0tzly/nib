@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "nib-plugin-helix"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "nib-plugin",
  "serde_json",

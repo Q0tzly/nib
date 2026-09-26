@@ -92,6 +92,17 @@ impl Selection {
         self.primary
     }
 
+    /// Maps the selection through `changes` made one after another. `text`
+    /// is the text after all of them.
+    pub fn map_all(&self, changes: &[ChangeSet], text: &Rope) -> Self {
+        let ranges = self
+            .ranges
+            .iter()
+            .map(|range| changes.iter().fold(*range, |range, set| range.map(set)))
+            .collect();
+        Self::normalized(ranges, self.primary, text)
+    }
+
     /// Maps the selection through `changes`. `text` is the changed text.
     pub fn map(&self, changes: &ChangeSet, text: &Rope) -> Self {
         let ranges = self.ranges.iter().map(|range| range.map(changes)).collect();

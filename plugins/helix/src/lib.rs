@@ -51,6 +51,8 @@ enum Pending {
     Space,
     /// `"`, waiting for a register's name.
     Register,
+    /// `Ctrl-w` and `Space w`, for split views.
+    Window,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -380,6 +382,10 @@ impl Helix {
                 'u' => ScrollAmount::HalfPage(-1),
                 'f' => ScrollAmount::Page(1),
                 'b' => ScrollAmount::Page(-1),
+                'w' => {
+                    self.wait(Pending::Window, count);
+                    return true;
+                }
                 _ => return false,
             };
             self.scroll(view, amount);
@@ -601,12 +607,33 @@ impl Helix {
                     }
                     return;
                 }
+                if c == 'w' {
+                    self.pending = Some(Pending::Window);
+                    return;
+                }
                 let command = match c {
                     'f' => "picker.files",
                     'k' => "lsp.hover",
                     _ => return,
                 };
                 call_or_show(command);
+            }
+            Pending::Window => {
+                let (command, args) = match c {
+                    'v' => ("view.split", r#"{"direction":"vertical"}"#),
+                    's' => ("view.split", r#"{"direction":"horizontal"}"#),
+                    'w' => ("view.focus", r#"{"to":"next"}"#),
+                    'h' => ("view.focus", r#"{"to":"left"}"#),
+                    'j' => ("view.focus", r#"{"to":"down"}"#),
+                    'k' => ("view.focus", r#"{"to":"up"}"#),
+                    'l' => ("view.focus", r#"{"to":"right"}"#),
+                    'q' => ("view.close", ""),
+                    'o' => ("view.only", ""),
+                    _ => return,
+                };
+                if let Err(err) = commands::call(command, args) {
+                    ui::show_message(&err);
+                }
             }
             Pending::Goto => {
                 let goto: fn(&Doc, u64, Option<u64>) -> u64 = match c {

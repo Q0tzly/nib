@@ -570,3 +570,53 @@ fn the_clipboard_is_the_plus_register() {
     type_keys(&mut editor, "p");
     assert_eq!(editor.message(), Some("register \" is empty"));
 }
+
+fn window(editor: &mut Editor, key: &str) {
+    editor.handle_key(KeyEvent::ctrl('w'));
+    type_keys(editor, key);
+}
+
+#[test]
+fn views_split_and_follow_each_other() {
+    let mut editor = editor_with_text("one\ntwo\n");
+    editor.resize(41, 10);
+    window(&mut editor, "v");
+    // Side by side, a line between.
+    let rows = screen(&editor);
+    let top: String = rows[0].chars().take(24).collect();
+    assert_eq!(top, "one                 │one");
+    // Typed in the new view, shown in both.
+    type_keys(&mut editor, "jix<esc>");
+    let rows = screen(&editor);
+    assert!(
+        rows[1].starts_with("xtwo") && rows[1].contains("│xtwo"),
+        "{rows:#?}"
+    );
+    // The other view kept its place, moved by the edit only.
+    window(&mut editor, "h");
+    assert_eq!(primary(&editor), (0, 1));
+    window(&mut editor, "l");
+    assert_eq!(primary(&editor).0, 5, "after the x typed");
+
+    window(&mut editor, "q");
+    assert!(!screen(&editor)[0].contains('│'));
+    window(&mut editor, "q");
+    assert_eq!(editor.message(), Some("the last view cannot be closed"));
+}
+
+#[test]
+fn views_one_above_another_show_their_names() {
+    let mut editor = editor_with_text("one\ntwo\n");
+    editor.resize(30, 10);
+    type_keys(&mut editor, " ws");
+    let rows = screen(&editor);
+    assert_eq!(rows[0].trim_end(), "one");
+    assert!(rows[4].starts_with("── [scratch] ─"), "{rows:#?}");
+    assert_eq!(rows[5].trim_end(), "one");
+    // Undo in one view moves the other's selection too.
+    type_keys(&mut editor, "ggdk");
+    window(&mut editor, "k");
+    type_keys(&mut editor, "u");
+    window(&mut editor, "o");
+    assert_eq!(screen(&editor)[4].trim_end(), "");
+}

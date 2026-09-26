@@ -130,6 +130,8 @@ fn builtin(name: &str) -> Option<Style> {
             reverse: true,
             ..Style::default()
         }),
+        // The lines between split views.
+        "ui.window" => Some(fg(8)),
         "ui.popup" => Some(Style {
             bg: Color::Indexed(8),
             ..Style::default()

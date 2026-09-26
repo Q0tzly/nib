@@ -22,6 +22,7 @@ pub mod selection;
 mod syntax;
 pub mod ui;
 pub mod view;
+mod windows;
 
 pub use background::Waker;
 pub use buffer::{Buffer, Change, LineEnding};
@@ -41,3 +42,4 @@ pub use process::Stream;
 pub use selection::{Range, Selection};
 pub use ui::{Side, Span, StyledLine, Theme};
 pub use view::View;
+pub use windows::Rect;

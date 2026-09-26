@@ -5,6 +5,7 @@ use crate::grid::CursorShape;
 use crate::selection::Selection;
 
 /// A buffer shown on screen, with its own selection and scroll position.
+#[derive(Clone)]
 pub struct View {
     pub buffer: usize,
     pub selection: Selection,

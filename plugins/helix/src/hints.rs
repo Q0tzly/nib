@@ -52,10 +52,22 @@ pub fn lines(pending: Pending) -> Option<Vec<Vec<Span>>> {
             let title = if forward { "Next" } else { "Previous" };
             (title, OBJECTS.to_vec())
         }
+        Pending::Window => (
+            "Window",
+            vec![
+                ("v", "split side by side"),
+                ("s", "split one above another"),
+                ("w", "next view"),
+                ("h j k l", "view to the left, below, above, right"),
+                ("q", "close this view"),
+                ("o", "close the other views"),
+            ],
+        ),
         Pending::Space => (
             "Space",
             vec![
                 ("f", "open a file"),
+                ("w", "views…"),
                 ("k", "show what it is"),
                 ("y", "yank to the clipboard"),
                 ("p", "paste the clipboard after"),

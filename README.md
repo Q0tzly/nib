@@ -19,7 +19,7 @@ What works today, all as plugins on the same public API:
 - Syntax highlighting and text objects with tree-sitter for Bash, Go, JSON, Markdown, Python, Rust, TOML, and YAML (one data-only plugin per language), with languages inside others: the code blocks and inline elements of Markdown, and the Markdown of Rust doc comments
 - LSP diagnostics, hover, go to definition, and completion (`lsp`); rust-analyzer, gopls, and pyright are set up by default
 - Installing plugins from GitHub releases, URLs, or by name
-- Plugin SDKs for Rust and Go
+- Plugin SDKs for Rust and Go, with a template, a build command, and tests that run without a terminal
 
 `Ctrl-g` opens the core menu and stops a plugin that hangs; it is the one key no plugin can take.
 
@@ -52,6 +52,15 @@ nib plugin add owner/repo      # or from a GitHub release, a URL, or a file
 nib plugin update
 nib plugin list
 nib plugin remove wordcount
+```
+
+To write one, start from a template that builds and passes its tests, and read the [plugin guide](sdk/README.md):
+
+```sh
+nib plugin new NAME [--go]     # a plugin in Rust, or in Go
+nib plugin build               # writes plugin.wasm
+nib plugin test                # runs tests/*.toml without a terminal
+nib --plugin .                 # try it
 ```
 
 ## Related repositories

@@ -174,7 +174,7 @@ M1 のゴールは、Helix 風キーマップのプラグインだけで、nib �
 | M2 構文 | 上の「M2 構文」を参照 |
 | M3 LSP とファイル選択 | 下の「M3 LSP とファイル選択」を参照 |
 | M4 仕上げ | 下の「M4 仕上げ」を参照 |
-| M5 AI で作れる土台 | プラグインの雛形（`nib plugin new`）、ターミナルなしでキーを送って結果を確かめるテストの仕組み（SDK）、プラグイン作者向けの API の文書 |
+| M5 AI で作れる土台 | 下の「M5 AI で作れる土台」を参照 |
 
 ## M3 LSP とファイル選択
 
@@ -337,6 +337,8 @@ M3 を終えた時点で、git のエディタ（`core.editor`）を hx から n
 確かめ方: テスト用のプラグインと helix プラグインのテストを TOML で書き、通ることと、壊したときに期待と実際が並んで出ることを見る。
 
 ### M5.2 作り始めから配るまで
+
+> 完了（2026-09-27）。`nib plugin new` で作った雛形は、Rust と Go のどちらも `nib plugin build` と `nib plugin test` をそのまま通る（`tui/tests/plugin_new.rs`）。Rust の雛形は、push したタグ `sdk/rust/v0.4.2` から SDK を取ってビルドできることも確かめた。
 
 - `nib plugin pack` は、nib が読むファイルだけを入れる
 - `nib plugin build`（Rust と Go）

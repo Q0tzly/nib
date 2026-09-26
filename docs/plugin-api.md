@@ -273,6 +273,7 @@ events = ["buffer-opened", "buffer-changed", "helix.mode_changed"]
 | `buffer-opened` / `buffer-saved` | バッファを開いた・保存した | `events` に書いたプラグイン |
 | `buffer-changed` | バッファの変更。変更後のバージョンと、変更の列 | 同上 |
 | `<plugin>.<name>` | プラグインが `events.emit(name, json)` で出したもの（custom イベント） | 同上 |
+| `editor.syntax_updated` | バッファの構文木が、編集のあとの解析で最新になった。`{"path": string \| null, "version": number}`（バッファのパスと、解析した時点のバージョン） | 同上 |
 | `timer` | `timers.set` で予約した時間がたった | 予約したプラグインだけ |
 | `process-output` / `process-exit` | 起動した外部プロセスの出力と終了 | 起動したプラグインだけ |
 | `files-listed` | `files.walk` で頼んだファイルの一覧（1,000 件ずつ） | 頼んだプラグインだけ |
@@ -281,6 +282,7 @@ events = ["buffer-opened", "buffer-changed", "helix.mode_changed"]
 - `buffer-changed` の変更の列は、先頭から順に 1 つずつ適用していけば変更後のテキストになるように並べる。LSP の `didChange` の `contentChanges` と同じ考え方で、変更ごとに、その時点のテキストでの行と列（バイト数）を付ける。LSP プラグインは、これをそのまま差分の同期に使える。
   - 1 回の `apply` の編集は、後ろから順に並べる。後ろの変更は前の位置を動かさないので、どれも変更前のテキストの位置のまま使える。
   - undo と redo も同じ形で届く。
+- `editor.` で始まるイベントはコアが出す。形は custom イベントと同じで、WIT の `event` に種類を足さずに済む（足すと API のバージョンが上がり、すべてのプラグインを作り直すことになる）。
 - custom イベントの名前には、出したプラグインの名前が自動で付く（`events.emit("mode_changed", ...)` → `helix.mode_changed`）。custom イベントはコマンドと対になる仕組み。コマンドは「誰かに頼む」、custom イベントは「起きたことを知らせる」。たとえばキーマッププラグインがモードの変化を知らせ、ステータスラインのプラグインがそれを表示する。
 - イベントは、それを起こした呼び出しが終わってから、起きた順に届ける。イベントを受けたプラグインが出したイベントも、同じ順番の最後に並ぶ。
   - 1 回にさばくイベントは 1,000 個までにする。プラグイン同士がイベントを投げ合って止まらなくなったときに、エディタが固まらないようにするため。超えた分は捨てて、メッセージで知らせる。

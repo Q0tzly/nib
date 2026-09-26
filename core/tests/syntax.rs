@@ -370,3 +370,127 @@ fn text_objects_in_other_languages() {
         fs::remove_file(&path).unwrap();
     }
 }
+
+fn editor_with(languages: &[&str], name: &str, text: &str) -> (Editor, std::path::PathBuf) {
+    let path = env::temp_dir().join(format!("nib-{}-{name}", std::process::id()));
+    fs::write(&path, text).unwrap();
+    let mut editor = Editor::default();
+    editor.open(&path).unwrap();
+    editor.load_plugin(&plugin_dir("helix")).unwrap();
+    for language in languages {
+        editor.load_plugin(&plugin_dir(language)).unwrap();
+    }
+    editor.resize(40, 12);
+    while editor.catch_up() {}
+    assert_eq!(editor.message(), None);
+    (editor, path)
+}
+
+const TITLE: Color = Color::Indexed(4);
+const LITERAL: Color = Color::Indexed(2);
+
+#[test]
+fn colors_code_blocks_in_their_language() {
+    let text = "# Notes\n\n```rust\nfn main() {}\n```\n\n```unknown\nfn x\n```\n";
+    let (mut editor, path) = editor_with(&["markdown", "rust"], "blocks.md", text);
+    assert_eq!(fg(&editor, 0, 3), KEYWORD);
+    assert_eq!(fg(&editor, 3, 3), FUNCTION);
+    // The fences stay Markdown, and so do blocks of unknown languages.
+    assert_eq!(fg(&editor, 0, 2), LITERAL);
+    assert_eq!(fg(&editor, 0, 7), LITERAL);
+
+    // Edits inside and before the block.
+    type_keys(&mut editor, "jjjA // c<esc>");
+    assert_eq!(fg(&editor, 13, 3), COMMENT);
+    assert_eq!(fg(&editor, 0, 3), KEYWORD);
+    type_keys(&mut editor, "ggO<ret><esc>");
+    assert_eq!(fg(&editor, 0, 5), KEYWORD);
+    assert_eq!(fg(&editor, 13, 5), COMMENT);
+
+    // Undo parses everything again.
+    type_keys(&mut editor, "uu");
+    assert_eq!(fg(&editor, 0, 3), KEYWORD);
+    assert_eq!(fg(&editor, 13, 3), Color::Reset);
+    fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn doc_comments_are_markdown() {
+    let text = "/// # Title\n///\n/// ```rust\n/// let x = 1;\n/// ```\nfn f() {}\n// # plain\n";
+    let (mut editor, path) = editor_with(&["rust", "markdown"], "doc.rs", text);
+    assert_eq!(fg(&editor, 6, 0), TITLE);
+    // The comment markers are not part of the Markdown.
+    assert_eq!(fg(&editor, 0, 0), COMMENT);
+    assert_eq!(fg(&editor, 0, 3), COMMENT);
+    // A code block over several comment lines, in Rust again.
+    assert_eq!(fg(&editor, 4, 3), KEYWORD);
+    assert_eq!(fg(&editor, 5, 6), COMMENT);
+
+    // A new doc comment line joins the document.
+    type_keys(&mut editor, "jjjo/// let y = 2;<esc>");
+    assert_eq!(fg(&editor, 4, 4), KEYWORD);
+
+    // So does a plain comment made a doc comment.
+    assert_eq!(fg(&editor, 5, 7), COMMENT);
+    let at = editor
+        .buffer()
+        .text()
+        .to_string()
+        .find("// # plain")
+        .unwrap();
+    editor.view_mut().selection =
+        Selection::new(vec![Range::new(at, at + 1)], 0, editor.buffer().text()).unwrap();
+    type_keys(&mut editor, "i/<esc>");
+    let row = screen(&editor)
+        .iter()
+        .position(|r| r.starts_with("/// # plain"));
+    assert_eq!(fg(&editor, 6, row.unwrap() as u16), TITLE);
+
+    // And leaves it when made plain again, in the middle too.
+    let at = editor.buffer().text().to_string().find("/ let y").unwrap();
+    editor.view_mut().selection =
+        Selection::new(vec![Range::new(at, at + 1)], 0, editor.buffer().text()).unwrap();
+    type_keys(&mut editor, "d");
+    let row = screen(&editor)
+        .iter()
+        .position(|r| r.starts_with("// let y"));
+    assert_eq!(fg(&editor, 3, row.unwrap() as u16), COMMENT);
+    fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn injections_follow_languages_loaded_later() {
+    let (mut editor, path) = editor_with(&["rust"], "later.rs", "/// # Title\nfn f() {}\n");
+    assert_eq!(fg(&editor, 6, 0), COMMENT);
+    editor.load_plugin(&plugin_dir("markdown")).unwrap();
+    while editor.catch_up() {}
+    assert_eq!(fg(&editor, 6, 0), TITLE);
+    fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn front_matter_is_yaml() {
+    let text = "---\nn: 1\n---\n\n# Notes\n";
+    let (editor, path) = editor_with(&["markdown", "yaml"], "front.md", text);
+    assert_eq!(fg(&editor, 3, 1), Color::Indexed(6), "the number");
+    assert_eq!(fg(&editor, 2, 4), TITLE);
+    fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn injections_come_after_the_first_colors() {
+    let path = env::temp_dir().join(format!("nib-{}-first.rs", std::process::id()));
+    fs::write(&path, "/// # Title\nfn f() {}\n").unwrap();
+    let mut editor = Editor::default();
+    editor.open(&path).unwrap();
+    editor.load_plugin(&plugin_dir("rust")).unwrap();
+    editor.load_plugin(&plugin_dir("markdown")).unwrap();
+    editor.resize(40, 6);
+    assert!(editor.catch_up());
+    assert_eq!(fg(&editor, 0, 1), KEYWORD);
+    assert_eq!(fg(&editor, 6, 0), COMMENT);
+    assert!(editor.catch_up());
+    assert_eq!(fg(&editor, 6, 0), TITLE);
+    assert!(!editor.catch_up());
+    fs::remove_file(&path).unwrap();
+}

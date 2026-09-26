@@ -1,6 +1,6 @@
 # Data only: a grammar and its queries, no plugin code.
 name = "markdown"
-version = "0.1.0"
+version = "0.1.1"
 api = "0.4"
 
 [[languages]]
@@ -11,6 +11,7 @@ grammar = "tree-sitter-markdown.wasm"
 [languages.queries]
 highlights = "queries/highlights.scm"
 textobjects = "queries/textobjects.scm"
+injections = "queries/injections.scm"
 
 # Fetched and checked by `cargo xtask build-plugins`; not in the repository.
 [[fetch]]

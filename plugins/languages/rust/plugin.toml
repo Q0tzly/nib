@@ -1,6 +1,6 @@
 # Data only: a grammar and its queries, no plugin code.
 name = "rust"
-version = "0.1.1"
+version = "0.1.2"
 api = "0.4"
 
 [[languages]]
@@ -11,6 +11,7 @@ grammar = "tree-sitter-rust.wasm"
 [languages.queries]
 highlights = "queries/highlights.scm"
 textobjects = "queries/textobjects.scm"
+injections = "queries/injections.scm"
 
 # Fetched and checked by `cargo xtask build-plugins`; not in the repository.
 [[fetch]]

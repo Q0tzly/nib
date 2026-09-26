@@ -114,27 +114,44 @@ impl State {
         Ok(())
     }
 
-    /// Gives buffers without a language the one for their file type.
+    /// Gives buffers without a language the one for their file type, and
+    /// parses the others again, since they may inject the new languages.
     pub fn attach_syntax(&mut self) {
         for buffer in &mut self.buffers {
-            if buffer.syntax.is_none()
-                && let Some(language) = buffer.path().and_then(|p| self.languages.for_path(p))
-            {
-                buffer.syntax = Some(BufferSyntax::new(language));
+            match &mut buffer.syntax {
+                Some(syntax) => syntax.invalidate(),
+                None => {
+                    buffer.syntax = buffer
+                        .path()
+                        .and_then(|p| self.languages.for_path(p))
+                        .map(BufferSyntax::new);
+                }
             }
         }
     }
 
-    /// Parses the shown buffer if it changed since the last parse. Hidden
-    /// buffers wait until they are shown. Returns whether it parsed.
+    /// Parses the shown buffers if they changed since the last parse.
+    /// Hidden buffers wait until they are shown. Injections a first parse
+    /// left for later wait for the next call. Returns whether the colors
+    /// may have changed.
     pub fn update_syntax(&mut self) -> bool {
         let mut shown: Vec<usize> = self.others.iter().map(|(_, v)| v.buffer).collect();
         shown.push(self.view.buffer);
         shown.sort_unstable();
         shown.dedup();
         let mut parsed = false;
-        for index in shown {
+        for &index in &shown {
             parsed |= self.parse(index);
+        }
+        if parsed {
+            return true;
+        }
+        for index in shown {
+            let buffer = &mut self.buffers[index];
+            let text = buffer.text().clone();
+            if let Some(syntax) = &mut buffer.syntax {
+                parsed |= self.languages.inject_pending(syntax, &text);
+            }
         }
         parsed
     }
@@ -147,19 +164,10 @@ impl State {
         let Some(syntax) = buffer.syntax.as_mut().filter(|s| s.dirty) else {
             return false;
         };
-        match self
-            .languages
-            .parse(syntax.language, &text, syntax.tree.as_ref())
-        {
-            Ok(tree) => {
-                syntax.tree = tree;
-                syntax.dirty = false;
-            }
-            Err(err) => {
-                // Shown without highlighting from now on.
-                buffer.syntax = None;
-                self.message = Some(format!("syntax: {err}"));
-            }
+        if let Err(err) = self.languages.parse(syntax, &text) {
+            // Shown without highlighting from now on.
+            buffer.syntax = None;
+            self.message = Some(format!("syntax: {err}"));
         }
         true
     }
@@ -191,10 +199,10 @@ impl State {
     ) -> Option<Vec<Option<crate::grid::Style>>> {
         let buffer = &self.buffers[index];
         let syntax = buffer.syntax.as_ref()?;
-        let tree = syntax.tree.as_ref()?;
+        syntax.tree.as_ref()?;
         Some(
             self.languages
-                .highlight(&self.theme, syntax.language, tree, buffer.text(), range),
+                .highlight(&self.theme, syntax, buffer.text(), range),
         )
     }
 

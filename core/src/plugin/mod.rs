@@ -3,6 +3,7 @@
 mod api;
 mod manifest;
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -153,22 +154,24 @@ enum Source<'a> {
     /// Built into the editor: the manifest and the other files by path.
     Bytes {
         manifest: &'a str,
-        files: &'a [(&'a str, &'a [u8])],
+        files: &'static [(&'static str, &'static [u8])],
     },
 }
 
 impl Source<'_> {
-    fn read(&self, path: &str) -> Result<Option<Vec<u8>>, String> {
+    /// Built-in files are borrowed, not copied: languages keep their
+    /// grammars until first used, megabytes for the standard ones.
+    fn read(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>, String> {
         match self {
             Source::Dir(dir) => match std::fs::read(dir.join(path)) {
-                Ok(bytes) => Ok(Some(bytes)),
+                Ok(bytes) => Ok(Some(Cow::Owned(bytes))),
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
                 Err(err) => Err(format!("{path}: {err}")),
             },
             Source::Bytes { files, .. } => Ok(files
                 .iter()
                 .find(|(name, _)| *name == path)
-                .map(|(_, bytes)| bytes.to_vec())),
+                .map(|(_, bytes)| Cow::Borrowed(*bytes))),
         }
     }
 }
@@ -363,7 +366,7 @@ impl Editor {
     pub fn load_builtin_plugin(
         &mut self,
         manifest: &str,
-        files: &[(&str, &[u8])],
+        files: &'static [(&'static str, &'static [u8])],
     ) -> Result<(), Error> {
         self.add_plugin(Source::Bytes { manifest, files })
     }
@@ -435,7 +438,8 @@ impl Editor {
                 let bytes = source
                     .read(path)?
                     .ok_or_else(|| format!("{path} is missing"))?;
-                let text = String::from_utf8(bytes).map_err(|_| format!("{path} is not UTF-8"))?;
+                let text = String::from_utf8(bytes.into_owned())
+                    .map_err(|_| format!("{path} is not UTF-8"))?;
                 queries.insert(name.clone(), text);
             }
             self.state_mut().languages.add(

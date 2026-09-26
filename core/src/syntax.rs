@@ -2,6 +2,7 @@
 //! plugins provide; parsing and highlighting stay in the core because every
 //! plugin shares them and they run on every edit and frame.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -36,7 +37,7 @@ struct Entry {
 /// that are not used cost nothing at startup.
 enum EntryState {
     Pending {
-        grammar: Vec<u8>,
+        grammar: Cow<'static, [u8]>,
         /// Sources by name.
         queries: BTreeMap<String, String>,
     },
@@ -233,7 +234,7 @@ impl Languages {
         &mut self,
         name: &str,
         file_types: Vec<String>,
-        grammar: Vec<u8>,
+        grammar: Cow<'static, [u8]>,
         queries: BTreeMap<String, String>,
     ) {
         let entry = Entry {

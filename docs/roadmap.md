@@ -259,9 +259,22 @@ M1 のゴールは、Helix 風キーマップのプラグインだけで、nib �
 
 確かめ方: エディタの中だけのクリップボードでテストし、tui では macOS のクリップボードとの行き来を試す。
 
-### M4.6 以降
+### M4.6 プラグインのインストール
+
+設計は [plugin-install.md](plugin-install.md)。URL ベースで始める。
+
+1. WIT のパッケージのバージョンを SDK にそろえ、マニフェストの `api` で合わないプラグインを見分ける
+2. `nib plugin pack` と、`.nib.tar.gz` の形
+3. `nib plugin add`（GitHub のリリースと、アーカイブの URL）、インストール済みのプラグインの読み込み
+4. `nib plugin update` / `remove`
+
+確かめ方: ローカルのアーカイブと、テスト用の GitHub の応答で、確認、展開の安全策、権限が増えたときの再確認を確かめる。実際の GitHub のリリースからも入れてみる。
+
+### M4.7 以降
+
 - 分割表示
-- Go SDK、`nib plugin add <url>` によるインストールと更新
+- Go SDK
+- 名前で探せるプラグインの一覧（[plugin-install.md](plugin-install.md) の「あとで足すもの」）
 
 M3 を終えた時点で、git のエディタ（`core.editor`）を hx から nib に切り替える。ハイライト、LSP、ファイル選択がそろうのが M3 で、それより前に切り替えると作業のたびに hx に戻ることになる。以降は nib を普段使いしながら、困ったところから直す。
 

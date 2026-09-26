@@ -6,6 +6,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::thread;
 
 use ropey::Rope;
 use streaming_iterator::StreamingIterator;
@@ -35,6 +36,8 @@ struct Entry {
 
 /// Grammars load the first time a file of their type is shown, so languages
 /// that are not used cost nothing at startup.
+// One per language, so its size does not matter.
+#[allow(clippy::large_enum_variant)]
 enum EntryState {
     Pending {
         grammar: Cow<'static, [u8]>,
@@ -46,11 +49,17 @@ enum EntryState {
         highlights: Option<Query>,
         /// Run after every parse, so compiled with the grammar.
         injections: Option<Query>,
+        /// Compiling `highlights` and `injections`, which for Rust takes as
+        /// long as parsing a file of a few thousand lines, alongside the
+        /// first parse.
+        compiling: Option<thread::JoinHandle<CompiledQueries>>,
         /// The other queries, compiled when first run.
         queries: BTreeMap<String, QueryState>,
     },
     Failed(String),
 }
+
+type CompiledQueries = Result<(Option<Query>, Option<Query>), String>;
 
 enum QueryState {
     Source(String),
@@ -264,17 +273,12 @@ impl Languages {
         let name = self.list[id].name.clone();
         let highlights = queries.remove("highlights");
         let injections = queries.remove("injections");
-        let loaded = self.load(
-            &name,
-            &grammar,
-            highlights.as_deref(),
-            injections.as_deref(),
-        );
-        self.list[id].state = match loaded {
-            Ok((language, highlights, injections)) => EntryState::Loaded {
+        self.list[id].state = match self.load(&name, &grammar) {
+            Ok(language) => EntryState::Loaded {
+                compiling: Some(compile_queries(&language, highlights, injections)),
                 language,
-                highlights,
-                injections,
+                highlights: None,
+                injections: None,
                 queries: queries
                     .into_iter()
                     .map(|(name, source)| (name, QueryState::Source(source)))
@@ -288,13 +292,39 @@ impl Languages {
         }
     }
 
-    fn load(
-        &mut self,
-        name: &str,
-        grammar: &[u8],
-        highlights: Option<&str>,
-        injections: Option<&str>,
-    ) -> Result<(Language, Option<Query>, Option<Query>), String> {
+    /// Waits for the queries of language `id` to compile, if they still
+    /// are. A query that fails to compile fails the language.
+    fn finish_loading(&mut self, id: usize) -> Result<(), String> {
+        let entry = &mut self.list[id];
+        let EntryState::Loaded {
+            compiling,
+            highlights,
+            injections,
+            ..
+        } = &mut entry.state
+        else {
+            return Ok(());
+        };
+        let Some(compiling) = compiling.take() else {
+            return Ok(());
+        };
+        match compiling.join() {
+            Ok(Ok(compiled)) => {
+                (*highlights, *injections) = compiled;
+                Ok(())
+            }
+            failed => {
+                let err = match failed {
+                    Ok(Err(err)) => format!("{}: {err}", entry.name),
+                    _ => format!("{}: compiling its queries crashed", entry.name),
+                };
+                entry.state = EntryState::Failed(err.clone());
+                Err(err)
+            }
+        }
+    }
+
+    fn load(&mut self, name: &str, grammar: &[u8]) -> Result<Language, String> {
         if self.engine.is_none() {
             let mut config = Config::new();
             if let Some(dir) = &self.cache_dir {
@@ -313,15 +343,7 @@ impl Languages {
         self.parser
             .set_wasm_store(store)
             .map_err(|err| err.to_string())?;
-        let language = loaded.map_err(|err| err.to_string())?;
-        let compile = |name: &str, source: Option<&str>| {
-            source
-                .map(|source| Query::new(&language, source).map_err(|err| format!("{name}: {err}")))
-                .transpose()
-        };
-        let highlights = compile("highlights", highlights)?;
-        let injections = compile("injections", injections)?;
-        Ok((language, highlights, injections))
+        loaded.map_err(|err| err.to_string())
     }
 
     pub fn name(&self, id: usize) -> &str {
@@ -484,7 +506,9 @@ impl Languages {
             let (chunk, start, _, _) = text.chunk_at_byte(byte);
             &chunk.as_bytes()[byte - start..]
         };
-        Ok(self.parser.parse_with_options(&mut read, old, None))
+        let tree = self.parser.parse_with_options(&mut read, old, None);
+        self.finish_loading(id)?;
+        Ok(tree)
     }
 
     /// Brings the injections of a tree of `language` up to date: looks for
@@ -803,6 +827,27 @@ impl Languages {
         found.dedup();
         Ok(found)
     }
+}
+
+fn compile_queries(
+    language: &Language,
+    highlights: Option<String>,
+    injections: Option<String>,
+) -> thread::JoinHandle<CompiledQueries> {
+    let language = language.clone();
+    thread::spawn(move || {
+        let compile = |name: &str, source: Option<String>| {
+            source
+                .map(|source| {
+                    Query::new(&language, &source).map_err(|err| format!("{name}: {err}"))
+                })
+                .transpose()
+        };
+        Ok((
+            compile("highlights", highlights)?,
+            compile("injections", injections)?,
+        ))
+    })
 }
 
 fn node_text<'a>(text: &'a Rope) -> impl TextProvider<&'a [u8]> + 'a {

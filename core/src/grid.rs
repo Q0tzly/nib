@@ -149,7 +149,7 @@ impl Grid {
     /// Puts `text` from `x`, cut off at the end of the row. Returns the
     /// column after the last grapheme put.
     pub fn put_str(&mut self, mut x: u16, y: u16, text: &str, style: Style) -> u16 {
-        for grapheme in text.graphemes(true) {
+        for grapheme in graphemes(text) {
             if x >= self.width {
                 break;
             }
@@ -179,8 +179,40 @@ impl Grid {
 /// could move the cursor or start escape sequences.
 const REPLACEMENT: char = '\u{fffd}';
 
+/// The graphemes of `text`, split as `UnicodeSegmentation::graphemes`
+/// splits them, but with a shortcut: two ASCII characters other than
+/// "\r\n" are always two graphemes, and code is mostly ASCII. Splitting
+/// with the Unicode tables was 40% of drawing a screen of code.
+pub fn graphemes(text: &str) -> impl Iterator<Item = &str> {
+    grapheme_indices(text).map(|(_, grapheme)| grapheme)
+}
+
+/// `graphemes` with where each starts in `text`.
+pub fn grapheme_indices(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut at = 0;
+    std::iter::from_fn(move || {
+        let rest = &text[at..];
+        let bytes = rest.as_bytes();
+        let first = *bytes.first()?;
+        let ascii_pair = match bytes.get(1) {
+            None => first.is_ascii(),
+            Some(&next) => first.is_ascii() && next.is_ascii() && (first, next) != (b'\r', b'\n'),
+        };
+        let len = if ascii_pair {
+            1
+        } else {
+            rest.graphemes(true).next().map_or(rest.len(), str::len)
+        };
+        let start = at;
+        at += len;
+        Some((start, &rest[..len]))
+    })
+}
+
 pub fn display_width(grapheme: &str) -> u16 {
-    if is_control(grapheme) {
+    // One byte is ASCII: a control, drawn as one replacement character, or
+    // a one-cell character.
+    if grapheme.len() == 1 || is_control(grapheme) {
         return 1;
     }
     // Zero-width graphemes still take a cell so the cursor can sit on them.
@@ -205,6 +237,25 @@ fn is_control(grapheme: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graphemes_split_as_unicode_says() {
+        for text in [
+            "",
+            "fn main() {}",
+            "a\r\nb\n",
+            "e\u{301}x",
+            "日本語 and ascii",
+            "👨‍👩‍👧 family",
+            "🇯🇵🇺🇸",
+            "x\u{200d}y",
+            "\t\u{7}",
+        ] {
+            let ours: Vec<_> = grapheme_indices(text).collect();
+            let unicode: Vec<_> = text.grapheme_indices(true).collect();
+            assert_eq!(ours, unicode, "{text:?}");
+        }
+    }
 
     #[test]
     fn wide_graphemes_take_two_cells() {

@@ -4,7 +4,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::buffer::Buffer;
 use crate::editor::{Editor, Menu};
-use crate::grid::{Cursor, CursorShape, Grid, Style, display_width};
+use crate::grid::{Cursor, CursorShape, Grid, Style, display_width, graphemes};
 use crate::layout;
 use crate::ui::{Panel, PopupAnchor, Side, Span, StyledLine, Theme};
 use crate::view::View;
@@ -115,7 +115,7 @@ impl Editor {
                 {
                     let text: String = line.iter().map(|span| span.text.as_str()).collect();
                     let before = text.get(..byte as usize).unwrap_or(&text);
-                    let x: u16 = before.graphemes(true).map(display_width).sum();
+                    let x: u16 = graphemes(before).map(display_width).sum();
                     cursor = (x < grid.width()).then_some(Cursor {
                         x,
                         y,
@@ -237,7 +237,7 @@ impl Editor {
             let mut offset = line_start;
             // Display column within the line; the screen shows `left..left + width`.
             let mut column = 0u32;
-            for grapheme in line.graphemes(true) {
+            for grapheme in graphemes(line) {
                 if column >= left + width {
                     break;
                 }
@@ -454,7 +454,7 @@ impl Editor {
         let cursor = self.view().cursor(text);
         let line = text.byte_to_line(cursor);
         let before_cursor: Cow<str> = text.byte_slice(text.line_to_byte(line)..cursor).into();
-        let column = before_cursor.graphemes(true).count();
+        let column = graphemes(&before_cursor).count();
         let mut right: StyledLine = Vec::new();
         for item in items(Side::Right) {
             right.extend(item.content.iter().cloned());
@@ -466,7 +466,7 @@ impl Editor {
         right.push(plain(&format!("{}:{} ", line + 1, column + 1)));
         let right_width: u16 = right
             .iter()
-            .flat_map(|span| span.text.graphemes(true))
+            .flat_map(|span| graphemes(&span.text))
             .map(display_width)
             .sum();
         let right_start = grid.width().saturating_sub(right_width);
@@ -498,7 +498,7 @@ impl Editor {
 
 /// `text` cut to `width` columns, keeping its end: "…/src/lib.rs".
 fn truncate_left(text: &str, width: u16) -> Cow<'_, str> {
-    let total: u16 = text.graphemes(true).map(display_width).sum();
+    let total: u16 = graphemes(text).map(display_width).sum();
     if total <= width {
         return Cow::Borrowed(text);
     }
@@ -537,7 +537,7 @@ fn put_line(grid: &mut Grid, theme: &Theme, mut x: u16, y: u16, line: &[Span], b
 /// Puts `text` from `x`, stopping before column `end`. Returns the column
 /// after the last grapheme put.
 fn put_clipped(grid: &mut Grid, mut x: u16, y: u16, text: &str, style: Style, end: u16) -> u16 {
-    for grapheme in text.graphemes(true) {
+    for grapheme in graphemes(text) {
         if x + display_width(grapheme) > end {
             break;
         }
@@ -548,7 +548,7 @@ fn put_clipped(grid: &mut Grid, mut x: u16, y: u16, text: &str, style: Style, en
 
 fn line_width(line: &[Span]) -> u16 {
     line.iter()
-        .flat_map(|span| span.text.graphemes(true))
+        .flat_map(|span| graphemes(&span.text))
         .map(display_width)
         .fold(0u16, u16::saturating_add)
 }

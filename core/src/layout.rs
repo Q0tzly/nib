@@ -4,9 +4,8 @@
 use std::borrow::Cow;
 
 use ropey::Rope;
-use unicode_segmentation::UnicodeSegmentation;
 
-use crate::grid::display_width;
+use crate::grid::{display_width, grapheme_indices, graphemes};
 
 /// The text of `line` without its line break.
 fn line_text(text: &Rope, line: usize) -> Cow<'_, str> {
@@ -36,9 +35,7 @@ pub fn column_of(text: &Rope, pos: usize, tab_width: u16) -> u32 {
     let line = text.byte_to_line(pos);
     let start = text.line_to_byte(line);
     let before: Cow<str> = text.byte_slice(start..pos).into();
-    before
-        .graphemes(true)
-        .fold(0, |column, grapheme| advance(column, grapheme, tab_width))
+    graphemes(&before).fold(0, |column, grapheme| advance(column, grapheme, tab_width))
 }
 
 /// The position in `line` whose grapheme covers display `column`, or the end
@@ -47,7 +44,7 @@ pub fn pos_at_column(text: &Rope, line: usize, column: u32, tab_width: u16) -> u
     let start = text.line_to_byte(line);
     let content = line_text(text, line);
     let mut current = 0;
-    for (offset, grapheme) in content.grapheme_indices(true) {
+    for (offset, grapheme) in grapheme_indices(&content) {
         let next = advance(current, grapheme, tab_width);
         if column < next {
             return start + offset;

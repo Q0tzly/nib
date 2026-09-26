@@ -16,7 +16,8 @@ pub const USAGE: &str = "usage: nib [--plugin DIR]... [FILE]...
        nib config path                 show where the settings are
        nib config init                 write commented settings files to start from
        nib plugin list                 list the plugins and their settings files
-       nib plugin add SOURCE [--yes]   install from owner/repo[@tag], a URL, or a file
+       nib plugin search [WORD]        find plugins to install by name
+       nib plugin add SOURCE [--yes]   install by name, or from owner/repo[@tag], a URL, or a file
        nib plugin update [NAME]...     update installed plugins [--yes]
        nib plugin remove NAME          uninstall a plugin
        nib plugin pack DIR             make NAME-VERSION.nib.tar.gz from a built plugin";
@@ -43,6 +44,8 @@ pub fn plugin(args: &[OsString]) -> ExitCode {
     let words: Vec<&str> = args.iter().copied().filter(|a| *a != "--yes").collect();
     let result = match words[..] {
         ["list"] => list(),
+        ["search"] => search(""),
+        ["search", word] => search(word),
         ["add", source] => with_store(|store| add(store, source, yes)),
         ["update", ref names @ ..] => with_store(|store| update(store, names, yes)),
         ["remove", name] => with_store(|store| remove(store, name)),
@@ -70,9 +73,41 @@ fn confirmer(yes: bool) -> impl FnMut(&str) -> bool {
     }
 }
 
-fn add(store: &Store, source: &str, yes: bool) -> Result<(), String> {
+fn search(word: &str) -> Result<(), String> {
+    let listings = install::index()?;
+    let found = install::search(&listings, word);
+    if found.is_empty() {
+        println!("no plugins found");
+        return Ok(());
+    }
+    let width = |f: fn(&install::Listing) -> &str| found.iter().map(|l| f(l).len()).max();
+    let name = width(|l| &l.name).unwrap_or(0).max("NAME".len());
+    let source = width(|l| &l.source).unwrap_or(0).max("SOURCE".len());
+    println!("{:name$}  {:source$}  DESCRIPTION", "NAME", "SOURCE");
+    for listing in found {
+        println!(
+            "{:name$}  {:source$}  {}",
+            listing.name, listing.source, listing.description
+        );
+    }
+    Ok(())
+}
+
+fn add(store: &Store, text: &str, yes: bool) -> Result<(), String> {
     let builtin: Vec<&str> = builtin::PLUGINS.iter().map(|(name, _, _)| *name).collect();
-    match install::add(store, source, &builtin, &mut confirmer(yes))? {
+    // A name is only a way to the source, which is what is kept.
+    let (source, listed) = if install::is_name(text) {
+        let listings = install::index()?;
+        let listing = listings
+            .into_iter()
+            .find(|l| l.name == text)
+            .ok_or_else(|| format!("no plugin named {text} in {}", install::INDEX))?;
+        println!("{text} is {} in the index", listing.source);
+        (listing.source, Some(text))
+    } else {
+        (text.to_string(), None)
+    };
+    match install::add(store, &source, listed, &builtin, &mut confirmer(yes))? {
         Some(name) => println!(
             "installed {name} in {}; it loads the next time nib starts",
             store.dir(&name).display()

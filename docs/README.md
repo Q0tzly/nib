@@ -9,6 +9,6 @@
 | [plugin-api.md](plugin-api.md) | WIT の設計方針、イベントとコマンドの流れ、ライフサイクル、権限 |
 | [keymap.md](keymap.md) | モーダルの扱い、キーマップをプラグインで実現するしくみ |
 | [lsp.md](lsp.md) | LSP プラグインの範囲、サーバーの設定、位置の数え方 |
-| [plugin-install.md](plugin-install.md) | プラグインの配布とインストール（`nib plugin add` / `update` / `remove`） |
+| [plugin-install.md](plugin-install.md) | プラグインの配布とインストール（`nib plugin search` / `add` / `update` / `remove`） |
 | [roadmap.md](roadmap.md) | マイルストーン |
 | adr/ | 個別の設計判断の記録（`NNNN-title.md`） |

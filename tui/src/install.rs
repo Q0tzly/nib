@@ -5,7 +5,7 @@
 use std::fs::{self, File};
 use std::io::{self, BufRead, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use flate2::Compression;
 use flate2::read::GzDecoder;
@@ -15,6 +15,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const SUFFIX: &str = ".nib.tar.gz";
+/// The list of plugins to find by name: a TOML file in a git repository,
+/// taking additions by pull request.
+pub const INDEX: &str = "https://raw.githubusercontent.com/q0tzly/nib-plugins/main/plugins.toml";
 /// The most an archive may unpack to.
 const MAX_SIZE: u64 = 100 << 20;
 
@@ -218,7 +221,7 @@ fn fetch(source: &Source, work: &Path) -> Result<Fetched, String> {
             };
             let api = format!("https://api.github.com/repos/{owner}/{repo}/releases/{release}");
             let response = work.join("release.json");
-            curl(&api, &response)?;
+            download(&api, &response)?;
             let text = fs::read_to_string(&response).map_err(|err| err.to_string())?;
             let release: Value =
                 serde_json::from_str(&text).map_err(|err| format!("{api}: {err}"))?;
@@ -228,7 +231,7 @@ fn fetch(source: &Source, work: &Path) -> Result<Fetched, String> {
         }
     };
     let archive = work.join(format!("plugin{SUFFIX}"));
-    curl(&url, &archive)?;
+    download(&url, &archive)?;
     Ok(Fetched { archive, url, tag })
 }
 
@@ -249,12 +252,19 @@ fn release_asset(release: &Value) -> Result<(String, String), String> {
     }
 }
 
-fn curl(url: &str, out: &Path) -> Result<(), String> {
-    let status = Command::new("curl")
+fn curl(url: &str) -> Command {
+    let mut command = Command::new("curl");
+    command
         .args(["--fail", "--silent", "--show-error", "--location"])
-        .args(["--proto", "=https", "--output"])
+        .args(["--proto", "=https"])
+        .arg(url);
+    command
+}
+
+fn download(url: &str, out: &Path) -> Result<(), String> {
+    let status = curl(url)
+        .arg("--output")
         .arg(out)
-        .arg(url)
         .status()
         .map_err(|err| format!("running curl failed: {err}"))?;
     if status.success() {
@@ -262,6 +272,61 @@ fn curl(url: &str, out: &Path) -> Result<(), String> {
     } else {
         Err(format!("downloading {url} failed"))
     }
+}
+
+fn download_text(url: &str) -> Result<String, String> {
+    let output = curl(url)
+        .stderr(Stdio::inherit())
+        .output()
+        .map_err(|err| format!("running curl failed: {err}"))?;
+    if !output.status.success() {
+        return Err(format!("downloading {url} failed"));
+    }
+    String::from_utf8(output.stdout).map_err(|err| format!("{url}: {err}"))
+}
+
+/// A plugin in the index.
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+pub struct Listing {
+    pub name: String,
+    /// Where to get it, as `add` takes it.
+    pub source: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+#[derive(Deserialize)]
+struct Index {
+    #[serde(default, rename = "plugin")]
+    plugins: Vec<Listing>,
+}
+
+/// Downloads the index.
+pub fn index() -> Result<Vec<Listing>, String> {
+    parse_index(&download_text(INDEX)?).map_err(|err| format!("{INDEX}: {err}"))
+}
+
+fn parse_index(text: &str) -> Result<Vec<Listing>, String> {
+    toml::from_str::<Index>(text)
+        .map(|index| index.plugins)
+        .map_err(|err| err.to_string())
+}
+
+/// The listings with `word` in their name or description, ignoring case.
+pub fn search<'a>(listings: &'a [Listing], word: &str) -> Vec<&'a Listing> {
+    let word = word.to_lowercase();
+    listings
+        .iter()
+        .filter(|l| {
+            l.name.to_lowercase().contains(&word) || l.description.to_lowercase().contains(&word)
+        })
+        .collect()
+}
+
+/// Whether `add` takes `text` as a name to look up in the index, rather
+/// than as where to get the plugin.
+pub fn is_name(text: &str) -> bool {
+    !text.is_empty() && !text.contains(['/', '\\', ':', '@']) && !text.ends_with(SUFFIX)
 }
 
 fn sha256(path: &Path) -> Result<String, String> {
@@ -351,11 +416,13 @@ fn put_in_place(store: &Store, work: &Work, name: &str) -> Result<(), String> {
 }
 
 /// `nib plugin add`. `builtin` names the plugins built into nib, which an
-/// installed one may not share a name with. Returns the plugin's name, or
-/// `None` when the user said no.
+/// installed one may not share a name with. `listed` is the name the index
+/// gave `text` under, which the plugin must have. Returns the plugin's
+/// name, or `None` when the user said no.
 pub fn add(
     store: &Store,
     text: &str,
+    listed: Option<&str>,
     builtin: &[&str],
     confirm: &mut dyn FnMut(&str) -> bool,
 ) -> Result<Option<String>, String> {
@@ -363,6 +430,11 @@ pub fn add(
     let work = Work::new(store)?;
     let (fetched, manifest) = prepare(&source, &work)?;
     let name = &manifest.name;
+    if let Some(listed) = listed.filter(|listed| listed != name) {
+        return Err(format!(
+            "{text} is listed as {listed}, but the plugin there is {name}"
+        ));
+    }
     if builtin.contains(&name.as_str()) {
         return Err(format!("{name} is the name of a plugin built into nib"));
     }
@@ -642,7 +714,7 @@ mod tests {
         };
         let archive = packed(&temp.0, "foo", "0.1.0", "\"clipboard\"");
         let mut asked = String::new();
-        let name = add(&store, &archive, &["helix"], &mut |q| {
+        let name = add(&store, &archive, None, &["helix"], &mut |q| {
             asked = q.to_string();
             true
         })
@@ -669,7 +741,7 @@ mod tests {
             data: temp.0.join("data"),
         };
         let first = packed(&temp.0, "foo", "0.1.0", "\"clipboard\"");
-        add(&store, &first, &[], &mut |_| true).unwrap();
+        add(&store, &first, None, &[], &mut |_| true).unwrap();
         let record = || store.records().unwrap()[0].clone();
         let from = |path: &str| Source::File(path.into());
 
@@ -710,17 +782,61 @@ mod tests {
         let yes = &mut |_: &str| true;
         let helix = packed(&temp.0, "helix", "9.0.0", "");
         assert!(
-            add(&store, &helix, &["helix"], yes)
+            add(&store, &helix, None, &["helix"], yes)
                 .unwrap_err()
                 .contains("built into nib")
         );
         let dir = plugin(&temp.0, "old", "0.1.0", "", "0.1");
         let old = pack(&dir, &temp.0).unwrap();
-        let err = add(&store, &old.to_string_lossy(), &[], yes).unwrap_err();
+        let err = add(&store, &old.to_string_lossy(), None, &[], yes).unwrap_err();
         assert!(err.contains("plugin API 0.1"), "{err}");
         // Saying no installs nothing.
         let foo = packed(&temp.0, "foo", "0.1.0", "");
-        assert_eq!(add(&store, &foo, &[], &mut |_| false), Ok(None));
+        assert_eq!(add(&store, &foo, None, &[], &mut |_| false), Ok(None));
         assert!(!store.dir("foo").exists());
+        // What the index calls it is what it has to be.
+        let err = add(&store, &foo, Some("bar"), &[], yes).unwrap_err();
+        assert!(err.contains("listed as bar"), "{err}");
+    }
+
+    #[test]
+    fn the_index_is_searched_by_name_and_description() {
+        let listings = parse_index(
+            r#"
+            [[plugin]]
+            name = "wordcount"
+            source = "someone/nib-wordcount"
+            description = "Counts words in the status line"
+
+            [[plugin]]
+            name = "git"
+            source = "someone/nib-git"
+            "#,
+        )
+        .unwrap();
+        let names = |word| -> Vec<&str> {
+            search(&listings, word)
+                .iter()
+                .map(|l| l.name.as_str())
+                .collect()
+        };
+        assert_eq!(names("STATUS"), ["wordcount"]);
+        assert_eq!(names("git"), ["git"]);
+        assert_eq!(names(""), ["wordcount", "git"]);
+        assert!(parse_index("[[plugin]]\nname = \"x\"").is_err());
+    }
+
+    #[test]
+    fn names_are_told_from_sources() {
+        assert!(is_name("wordcount"));
+        for source in [
+            "someone/nib-foo",
+            "foo.nib.tar.gz",
+            "https://x/foo.nib.tar.gz",
+            "foo@v1",
+            "C:foo",
+        ] {
+            assert!(!is_name(source), "{source}");
+        }
     }
 }

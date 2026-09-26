@@ -292,9 +292,17 @@ M1 のゴールは、Helix 風キーマップのプラグインだけで、nib �
 
 確かめ方: Go のプラグインを nib で読み込み、キーの処理、コマンド、イベントがつながることをテストで確かめる。
 
-### M4.9 以降
+### M4.9 名前で探せるプラグインの一覧
 
-- 名前で探せるプラグインの一覧（[plugin-install.md](plugin-install.md) の「あとで足すもの」）
+> 完了（2026-09-26）。Go で書いたサンプル（`wordcount`）を公開し、GitHub のリリースからの `add`、名前での `add`、`search`、`update` を、実際の GitHub を相手に確かめた。
+
+- サンプルのプラグイン [q0tzly/nib-plugin-example](https://github.com/q0tzly/nib-plugin-example)。Go で書き、タグを push すると `.nib.tar.gz` をリリースに置く
+- 一覧のリポジトリ [q0tzly/nib-plugins](https://github.com/q0tzly/nib-plugins)（`plugins.toml`）
+- `nib plugin search [語]` と、名前での `nib plugin add`（[plugin-install.md](plugin-install.md) の「名前で探す」）
+
+確かめ方: `nib plugin add wordcount` で入れたプラグインが nib で動き、記録の取得元がリポジトリになっていること。
+
+### M4.10 以降
 
 M3 を終えた時点で、git のエディタ（`core.editor`）を hx から nib に切り替える。ハイライト、LSP、ファイル選択がそろうのが M3 で、それより前に切り替えると作業のたびに hx に戻ることになる。以降は nib を普段使いしながら、困ったところから直す。
 

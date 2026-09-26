@@ -11,6 +11,54 @@ A modal text editor where everything — including the default keymap — is a W
 - **Plugins in any language.** Plugins are WebAssembly components built against a single API definition (WIT). Write them in Rust, Go, or anything that targets the component model.
 - **Defaults are plugins too.** The standard feature set, starting with a Helix-style keymap, is built with the same public API that third-party plugins use.
 
+## Status
+
+What works today, all as plugins on the same public API:
+
+- A Helix-style keymap (`helix`), with a file picker (`picker`, `Space f`), split views (`Ctrl-w`), and the system clipboard (`Space y` / `Space p`)
+- Syntax highlighting and text objects with tree-sitter for Bash, Go, JSON, Markdown, Python, Rust, TOML, and YAML (one data-only plugin per language)
+- LSP diagnostics, hover, go to definition, and completion (`lsp`); rust-analyzer, gopls, and pyright are set up by default
+- Installing plugins from GitHub releases, URLs, or by name
+- Plugin SDKs for Rust and Go
+
+`Ctrl-g` opens the core menu and stops a plugin that hangs; it is the one key no plugin can take.
+
+## Building
+
+There are no prebuilt binaries yet. You need Rust with the `wasm32-wasip2` target, CMake, and `curl`:
+
+```sh
+rustup target add wasm32-wasip2
+cargo xtask build-plugins      # the standard plugins, which nib embeds
+cargo install --path tui       # installs `nib`
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the tests and the rest of the toolchain.
+
+## Using
+
+```sh
+nib FILE...
+nib config init                # write commented settings files to start from
+nib config path                # show where the settings are
+```
+
+Plugins made by others are installed as prebuilt `.nib.tar.gz` archives. nib shows the capabilities a plugin asks for and asks before installing it:
+
+```sh
+nib plugin search [WORD]       # find plugins in the index
+nib plugin add wordcount       # install by name from the index
+nib plugin add owner/repo      # or from a GitHub release, a URL, or a file
+nib plugin update
+nib plugin list
+nib plugin remove wordcount
+```
+
+## Related repositories
+
+- [nib-editor/plugins](https://github.com/nib-editor/plugins): the index that `nib plugin search` and `nib plugin add NAME` read. Add a plugin to it by pull request.
+- [nib-editor/plugin-example](https://github.com/nib-editor/plugin-example): an example plugin in Go with a release workflow, to start a plugin from.
+
 ## Layout
 
 ```

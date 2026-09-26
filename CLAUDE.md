@@ -13,6 +13,11 @@ WASM プラグインで全機能を構成するモーダルエディタ。標準
 - `docs/` — 設計ドキュメント
 - `bench/` — 既存エディタと比べる性能計測（`python3 bench/latency.py FILE`）
 
+関連するリポジトリ（`nib-editor` の下。手元では ghq で `~/dev/github.com/nib-editor/` に置く）:
+
+- `nib-editor/plugins` — `nib plugin search` と名前での `nib plugin add` が読む一覧（`plugins.toml`）。登録は PR で受け、CI が形だけを確かめる。
+- `nib-editor/plugin-example` — Go で書いたサンプル（`wordcount`）。`v*` のタグを push するとリリースに `.nib.tar.gz` を置く。Go SDK を新しく出したら、ここの `go.mod` も上げてビルドを確かめる。
+
 機能をコアに入れるかプラグインにするか迷ったら、プラグイン側に倒す。コアに入れるのは「プラグインからは実現できない」か「複数のプラグインが共有する基盤で、各プラグインに持たせると重複や性能の問題が出る」もの（例: tree-sitter の解析基盤）だけ。
 
 ## コマンド

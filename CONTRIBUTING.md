@@ -12,7 +12,7 @@ rustup target add wasm32-wasip2
 
 Building the core needs [CMake](https://cmake.org/), which wasmtime's C API uses; tree-sitter loads grammars through it. `cargo xtask build-plugins` downloads grammars with `curl`.
 
-The Go SDK's test plugin needs [TinyGo](https://tinygo.org/) 0.42 or later, [binaryen](https://github.com/WebAssembly/binaryen)'s `wasm-opt`, and [wasm-tools](https://github.com/bytecodealliance/wasm-tools). Without TinyGo, `cargo xtask build-plugins` skips it and its test passes without running. After changing `api/wit/`, copy it to `sdk/go/wit/deps/nib-plugin/` and run `go generate` in `sdk/go`.
+The Go SDK's test plugin needs [TinyGo](https://tinygo.org/) 0.42 or later (with Go 1.25 to 1.27), [binaryen](https://github.com/WebAssembly/binaryen)'s `wasm-opt`, and [wasm-tools](https://github.com/bytecodealliance/wasm-tools). Without TinyGo, `cargo xtask build-plugins` skips it and its test passes without running. After changing `api/wit/`, copy it to `sdk/go/wit/deps/nib-plugin/` and run `go generate` in `sdk/go`.
 
 Build the plugins before building or testing the editor. `nib` embeds the standard plugins, and the core's tests run them:
 

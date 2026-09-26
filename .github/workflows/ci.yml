@@ -45,7 +45,7 @@ jobs:
       # makes components with wasm-tools.
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.27"
       - uses: acifani/setup-tinygo@v2
         with:
           tinygo-version: "0.42.0"

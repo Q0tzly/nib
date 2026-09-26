@@ -41,7 +41,7 @@
 アクションは 2 種類ある。
 
 - **組み込み**: 単語移動や削除のように、プラグインの中で実装するもの。すべて `helix.<名前>` のコマンドとしても登録し、他のプラグインや設定から呼べるようにする。
-- **コマンド**: `buffer.save` や、他のプラグインの `lsp.goto_definition` のように、名前で呼ぶもの。
+- **コマンド**: `buffer.save` や、他のプラグインの `lsp.definition` のように、名前で呼ぶもの。
 
 名前は Helix のコマンド名（`move_next_word_start` など）に合わせる。
 
@@ -218,9 +218,9 @@ helix プラグインは、このために `clipboard` の権限を宣言する�
 
 | 入力 | 呼ぶコマンド |
 |------|--------------|
-| `:w` | `buffer.save` |
-| `:o <path>`（`:e` も同じ） | `buffer.open` |
-| `:q` / `:q!` | `editor.quit`（`:q!` は `{"force": true}`） |
+| `:w`（`:write`） | `buffer.save` |
+| `:o <path>`（`:open`、`:e`、`:edit` も同じ） | `buffer.open` |
+| `:q` / `:q!`（`:quit` / `:quit!`） | `editor.quit`（`:q!` は `{"force": true}`） |
 | `:wq` / `:x` | `buffer.save` のあと `editor.quit` |
 
 失敗したときは、コマンドが返したエラーを `ui.show-message` で表示する。

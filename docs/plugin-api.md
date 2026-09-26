@@ -117,18 +117,20 @@ interface editor {
     }
 
     resource buffer {
+        /// 変更のたびに増える（undo と redo も含む）
         version: func() -> u64;
         len: func() -> offset;
-        slice: func(start: offset, end: offset) -> string;
+        slice: func(start: offset, end: offset) -> result<string, error>;
         line-count: func() -> u64;
-        line-start: func(line: u64) -> offset;
-        line-of: func(pos: offset) -> u64;
-        next-grapheme: func(pos: offset) -> offset;
-        prev-grapheme: func(pos: offset) -> offset;
+        /// 行がなければ none
+        line-start: func(line: u64) -> option<offset>;
+        line-of: func(pos: offset) -> result<u64, error>;
+        next-grapheme: func(pos: offset) -> result<offset, error>;
+        prev-grapheme: func(pos: offset) -> result<offset, error>;
         path: func() -> option<string>;
         /// 正規表現で検索する。見つかった範囲を返す
-        find: func(pattern: string, start: offset, backward: bool) -> result<option<tuple<offset, offset>>, string>;
-        find-all: func(pattern: string, start: offset, end: offset) -> result<list<tuple<offset, offset>>, string>;
+        find: func(pattern: string, start: offset, backward: bool) -> result<option<tuple<offset, offset>>, error>;
+        find-all: func(pattern: string, start: offset, end: offset) -> result<list<tuple<offset, offset>>, error>;
     }
 
     variant scroll-amount { lines(s32), half-page(s32), page(s32) }
@@ -141,15 +143,21 @@ interface editor {
                     after: option<selection>, undo: undo-mode) -> result<_, error>;
         undo: func() -> bool;
         redo: func() -> bool;
-        /// 表示上の行単位で縦に動かした位置を返す（折り返しとタブを考慮する）
-        move-vertically: func(pos: offset, lines: s32) -> offset;
-        scroll: func(amount: scroll-amount);
+        set-cursor-shape: func(shape: cursor-shape);
+        /// 表示上の行単位で縦に動かした位置と、目指した列を返す（折り返しとタブを考慮する）。
+        /// 返った列を次に渡すと、短い行を通っても列を保てる
+        move-vertically: func(pos: offset, lines: s32, column: option<u32>) -> result<tuple<offset, u32>, error>;
+        /// カーソルを動かさずに表示を動かし、動かした行数を返す（上向きは負）
+        scroll: func(amount: scroll-amount) -> s32;
         /// 表示中のバッファの範囲
         visible-range: func() -> tuple<offset, offset>;
-        set-cursor-shape: func(shape: cursor-shape);
     }
 
     active-view: func() -> view;
+    /// 開いているすべてのバッファ
+    buffers: func() -> list<buffer>;
+    /// エディタの作業ディレクトリ（絶対パス）。バッファのパスは開いたときの形なので、ここからの相対パスのことがある
+    working-directory: func() -> string;
 }
 ```
 
@@ -223,7 +231,19 @@ interface syntax {
   - 呼び出し先がすでに呼び出し中のプラグイン（呼び出し元自身や、その呼び出し元）なら、再入になるのでエラーを返す。
   - 呼び出し先のプラグインが落ちたときは、呼び出し元にはエラーが返る。落ちたプラグインの再起動は、いちばん外側の呼び出しが終わってから行う。
 - `commands.all()` で、登録済みのコマンドの名前と説明を得る（コマンドの一覧や補完に使う）。
-- コアのコマンドの例: `buffer.open`、`buffer.save`、`buffer.close`、`editor.quit`、`view.split`（分割表示のコマンドは [architecture.md](architecture.md) の「分割表示」）。
+- コアのコマンド（引数は JSON）:
+
+| コマンド | 内容 |
+|----------|------|
+| `buffer.open` | `{"path": string}` のファイルを開く |
+| `buffer.save` | 表示中のバッファを保存する |
+| `buffer.next` / `buffer.previous` | 次 / 前のバッファを表示する |
+| `view.split` | `{"direction": "vertical" \| "horizontal"}` で分割する |
+| `view.close` / `view.only` | フォーカスのあるビューを閉じる / それ以外を閉じる |
+| `view.focus` | `{"to": "next" \| "left" \| "right" \| "up" \| "down"}` へフォーカスを移す |
+| `editor.quit` | 終了する。`{"force": true}` で保存していない変更を捨てる |
+
+  分割表示のコマンドは [architecture.md](architecture.md) の「分割表示」も見る。バッファを閉じるコマンドはまだない。
 
 呼び出しを同期にできるのは、呼び出し中はエディタの状態とプラグインの一覧をそのプラグインのストアに貸しているため。呼び出し先のプラグインへは、貸したものをそのまま又貸しする（[architecture.md](architecture.md) の「プラグインの実行」）。
 

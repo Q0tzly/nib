@@ -17,6 +17,15 @@ M3.4 の続きで作るもの:
 
 - 補完（下の「補完」）
 
+## コマンド
+
+| コマンド | 内容 |
+|----------|------|
+| `lsp.hover` | カーソル位置の説明をポップアップに出す（helix の `Space k`） |
+| `lsp.definition` | 定義へ移動する（helix の `gd`） |
+| `lsp.complete` | カーソルの前の語の補完を出す（helix の挿入モードの `Ctrl-x`） |
+| `lsp.status` | 動いているサーバーを、言語ごとに `rust ready` のような 1 行で返す（`starting` / `ready` / 落ちたものは `stopped`）。キーには割り当てていない。使うときは `plugins/helix.toml` の `[settings.keys.normal]`（[keymap.md](keymap.md) の「設定」）に、`space = { l = "lsp.status" }` のように書く |
+
 ## サーバーの設定
 
 `plugins/lsp.toml` の `[settings.servers.<言語>]` に、起動するコマンドを書く。言語の名前は、言語プラグインの `[[languages]]` の `name`（`syntax.language` が返すもの）。

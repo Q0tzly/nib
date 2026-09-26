@@ -21,6 +21,7 @@ pub const USAGE: &str = "usage: nib [--plugin DIR]... [FILE]...
        nib plugin update [NAME]...     update installed plugins [--yes]
        nib plugin remove NAME          uninstall a plugin
        nib plugin pack DIR             make NAME-VERSION.nib.tar.gz from a built plugin
+       nib plugin build [DIR]          build plugin.wasm with cargo or TinyGo
        nib plugin test [DIR] [FILE]... run a plugin's tests/*.toml without a terminal";
 
 pub fn config(args: &[OsString]) -> ExitCode {
@@ -52,6 +53,8 @@ pub fn plugin(args: &[OsString]) -> ExitCode {
         ["remove", name] => with_store(|store| remove(store, name)),
         ["pack", dir] => install::pack(Path::new(dir), Path::new("."))
             .map(|file| println!("wrote {}", file.display())),
+        ["build"] => crate::pluginbuild::run(Path::new(".")),
+        ["build", dir] => crate::pluginbuild::run(Path::new(dir)),
         ["test", ref rest @ ..] => test(rest),
         _ => Err(USAGE.to_string()),
     };

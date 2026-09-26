@@ -2,6 +2,7 @@ mod clipboard;
 mod commands;
 mod draw;
 mod install;
+mod pluginbuild;
 mod plugintest;
 mod settings;
 mod terminal;

@@ -205,8 +205,28 @@ impl State {
             // Shown without highlighting from now on.
             buffer.syntax = None;
             self.message = Some(format!("syntax: {err}"));
+            return true;
         }
+        self.syntax_updated(index);
         true
+    }
+
+    /// Tells plugins that buffer `index` has an up-to-date tree, so what
+    /// they read from it on every key can wait for this instead of for a
+    /// parse (docs/plugin-api.md).
+    fn syntax_updated(&mut self, index: usize) {
+        let buffer = &self.buffers[index];
+        let data = serde_json::json!({
+            "path": buffer.path().map(|p| p.to_string_lossy()),
+            "version": buffer.version(),
+        });
+        self.push_event(
+            None,
+            Event::Custom {
+                name: SYNTAX_UPDATED.into(),
+                data: data.to_string(),
+            },
+        );
     }
 
     /// Runs `f` with the up-to-date syntax tree of buffer `index`, if it has
@@ -619,6 +639,9 @@ pub struct Editor {
 const LENT: &str = "editor state is only lent during plugin calls";
 
 /// The commands the core runs itself, with their descriptions.
+/// The event the core emits when a buffer's syntax tree is up to date.
+const SYNTAX_UPDATED: &str = "editor.syntax_updated";
+
 pub(crate) const CORE_COMMANDS: &[(&str, &str)] = &[
     ("buffer.save", "Save the current buffer"),
     ("buffer.open", "Open a file: {\"path\": string}"),

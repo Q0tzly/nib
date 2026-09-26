@@ -32,8 +32,10 @@ fn highlights_and_follows_edits() {
     // The first parse waits until after the first frame.
     assert_eq!(fg(&editor, 0, 0), Color::Reset);
     assert!(editor.catch_up());
-    assert!(!editor.catch_up());
     assert_eq!(fg(&editor, 0, 0), KEYWORD);
+    // Then editor.syntax_updated reaches the keymap.
+    assert!(editor.catch_up());
+    assert!(!editor.catch_up());
     assert_eq!(fg(&editor, 3, 0), FUNCTION);
     assert_eq!(fg(&editor, 3, 1), FUNCTION);
 
@@ -292,6 +294,30 @@ fn highlights_the_matching_bracket() {
     assert!(!underlined(&editor, 13, 3), "the brace in the string");
     type_keys(&mut editor, "j");
     assert!(!underlined(&editor, 0, 5));
+    fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn the_matching_bracket_waits_for_the_tree_after_an_edit() {
+    let (mut editor, path) = rust_editor_with("match-edit", "fn f() {}\n");
+    let underlined = |editor: &Editor, x| {
+        let mut grid = Grid::default();
+        editor.render(&mut grid);
+        grid.cell(x, 0).style.underline
+    };
+    let text = editor.buffer().text().to_string();
+    let at = text.find('}').unwrap();
+    editor.view_mut().selection =
+        Selection::new(vec![Range::new(at, at + 1)], 0, editor.buffer().text()).unwrap();
+    type_keys(&mut editor, ";");
+    assert!(underlined(&editor, 7), "the opening brace");
+    // Deleting the closing brace leaves the opening one without a pair,
+    // which shows once the tree is parsed, not while the key is handled.
+    type_keys(&mut editor, "d");
+    assert_eq!(editor.buffer().text().to_string(), "fn f() {\n");
+    assert!(underlined(&editor, 7), "not yet updated");
+    while editor.catch_up() {}
+    assert!(!underlined(&editor, 7), "updated after the parse");
     fs::remove_file(&path).unwrap();
 }
 

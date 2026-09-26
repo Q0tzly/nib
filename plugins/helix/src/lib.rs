@@ -185,7 +185,14 @@ impl Guest for Plugin {
         Err(format!("no command {name}"))
     }
 
-    fn on_event(_ev: Event) {}
+    fn on_event(ev: Event) {
+        // The tree caught up with an edit: the bracket match waited for it.
+        if let Event::Custom(event) = ev
+            && event.name == "editor.syntax_updated"
+        {
+            highlight_match(&editor::active_view());
+        }
+    }
 }
 
 nib_plugin::export!(Plugin);
@@ -211,6 +218,7 @@ impl Helix {
             return KeyResult::Handled;
         }
         let view = editor::active_view();
+        let version = view.buffer().version();
         let was_inserting = self.mode == Mode::Insert;
         let handled = match self.remapped(&view, ev) {
             Some(handled) => handled,
@@ -223,8 +231,13 @@ impl Helix {
         }
         self.register_fresh = false;
         self.show_hints();
-        // The key may have switched buffers.
-        highlight_match(&editor::active_view());
+        // After an edit, reading the tree would wait for it to be parsed;
+        // editor.syntax_updated says when it is. The key may also have
+        // switched buffers.
+        let active = editor::active_view();
+        if active.buffer().version() == version {
+            highlight_match(&active);
+        }
         if handled {
             KeyResult::Handled
         } else {

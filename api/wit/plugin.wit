@@ -1,4 +1,4 @@
-package nib:plugin@0.1.0;
+package nib:plugin@0.4.0;
 
 interface types {
     /// A UTF-8 byte offset into a buffer.

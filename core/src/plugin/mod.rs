@@ -34,7 +34,7 @@ pub fn plugin_name(dir: &Path) -> Result<String, Error> {
 }
 
 /// The version of `nib:plugin` this host implements.
-pub const API_VERSION: &str = "0.1";
+pub const API_VERSION: &str = "0.4";
 
 /// How often the epoch advances during a plugin call. Timeouts are
 /// accurate to about one tick.

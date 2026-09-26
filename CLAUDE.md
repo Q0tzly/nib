@@ -40,6 +40,7 @@ cargo test --workspace
 
 - エディタ本体は workspace の `version` で管理する。
 - SDK はエディタとは別にバージョンを付ける。`api/` が変わらない限り SDK のバージョンは上げない。
+- `api/wit/` を変えたら、同じコミットで WIT のパッケージのバージョン（`nib:plugin@X.Y.Z`）も SDK と同じ段だけ上げ、`メジャー.マイナー` が変わったら `core` の `API_VERSION` と全プラグインの `plugin.toml` の `api` も合わせる。プラグインの `api` が nib と違えば読み込まない。
 - Go SDK は `sdk/go/` に独自の `go.mod` を置き、タグは `sdk/go/vX.Y.Z` 形式にする。
 
 ## 進め方

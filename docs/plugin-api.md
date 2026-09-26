@@ -28,7 +28,7 @@ helix-keymap/
 ```toml
 name = "helix"            # コマンドの名前空間にもなる
 version = "0.1.0"
-api = "0.1"               # 対応する nib:plugin のバージョン
+api = "0.4"               # 対応する nib:plugin のバージョン（メジャー.マイナー）
 
 capabilities = []         # "fs-read" / "fs-write" / "process" / "network"
 events = ["buffer-changed"]
@@ -43,7 +43,7 @@ WIT パッケージは `nib:plugin`。プラグインは `plugin` world に対�
 以下の WIT は形を示すためのスケッチで、一部の型は省略している。wasm-tools での検証は、`api/` に置くときに行う。
 
 ```wit
-package nib:plugin@0.1.0;
+package nib:plugin@0.4.0;
 
 world plugin {
     import editor;

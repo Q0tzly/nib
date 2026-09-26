@@ -2,7 +2,16 @@
 # Build them with `cargo xtask build-plugins` from the repository root.
 [workspace]
 resolver = "3"
-members = ["helix", "indent", "lsp", "picker", "test/*"]
+# Rust plugins only; test/go is built with TinyGo.
+members = [
+    "helix",
+    "indent",
+    "lsp",
+    "picker",
+    "test/events",
+    "test/insert",
+    "test/misbehave",
+]
 
 [workspace.package]
 edition = "2024"

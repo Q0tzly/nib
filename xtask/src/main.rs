@@ -58,6 +58,13 @@ fn build_plugins() -> Result<(), String> {
         }
         fs::create_dir_all(&out).map_err(|err| format!("{}: {err}", out.display()))?;
 
+        // Go plugins build with TinyGo, which is optional: without it they
+        // are left out, and so are the tests that use them.
+        if dir.join("go.mod").is_file() && !build_go(root, &dir, &out)? {
+            fs::remove_dir_all(&out).map_err(|err| format!("{}: {err}", out.display()))?;
+            println!("skipped {name}: tinygo is not installed");
+            continue;
+        }
         // A plugin with a Cargo.toml has code; one without is data only.
         if dir.join("Cargo.toml").is_file() {
             let package = read_toml(&dir.join("Cargo.toml"))?;
@@ -97,10 +104,18 @@ fn copy_data(from: &Path, to: &Path) -> Result<(), String> {
     for entry in entries {
         let path = entry.map_err(|err| err.to_string())?.path();
         let name = path.file_name().unwrap_or_default();
-        if ["Cargo.toml", "Cargo.lock", "src", "target"]
-            .iter()
-            .any(|skip| name == *skip)
-        {
+        let source = [
+            "Cargo.toml",
+            "Cargo.lock",
+            "src",
+            "target",
+            "go.mod",
+            "go.sum",
+        ]
+        .iter()
+        .any(|skip| name == *skip)
+            || path.extension().is_some_and(|e| e == "go");
+        if source {
             continue;
         }
         let dest = to.join(name);
@@ -112,6 +127,25 @@ fn copy_data(from: &Path, to: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Builds the Go plugin in `dir` into `out/plugin.wasm` with TinyGo and
+/// the Go SDK's copy of the WIT. Returns false when TinyGo is missing.
+fn build_go(root: &Path, dir: &Path, out: &Path) -> Result<bool, String> {
+    let status = Command::new("tinygo")
+        .args(["build", "-target=wasip2", "--wit-package"])
+        .arg(root.join("sdk/go/wit"))
+        .args(["--wit-world", "plugin", "-o"])
+        .arg(out.join("plugin.wasm"))
+        .arg(".")
+        .current_dir(dir)
+        .status();
+    match status {
+        Ok(status) if status.success() => Ok(true),
+        Ok(_) => Err(format!("building {} with tinygo failed", dir.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(format!("running tinygo failed: {err}")),
+    }
 }
 
 /// Downloads `url` once into `target/downloads`, keyed by its SHA-256, and

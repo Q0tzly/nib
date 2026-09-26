@@ -28,3 +28,4 @@ Files from other projects that nib ships as they are.
 | `tree-sitter-toml.wasm`, fetched by `cargo xtask build-plugins` | [tree-sitter-toml](https://github.com/tree-sitter-grammars/tree-sitter-toml) release asset | v0.7.0 | MIT |
 | `plugins/languages/yaml/queries/highlights.scm` | [tree-sitter-yaml](https://github.com/tree-sitter-grammars/tree-sitter-yaml) `queries/highlights.scm` | v0.7.2 | MIT ([LICENSE-tree-sitter-yaml](plugins/languages/yaml/LICENSE-tree-sitter-yaml)) |
 | `tree-sitter-yaml.wasm`, fetched by `cargo xtask build-plugins` | [tree-sitter-yaml](https://github.com/tree-sitter-grammars/tree-sitter-yaml) release asset | v0.7.2 | MIT |
+| `sdk/go/wit/deps/{cli,clocks,filesystem,io,random,sockets}/*.wit` | [WASI](https://github.com/WebAssembly/WASI) 0.2.0, as bundled with TinyGo 0.42.0 (`lib/wasi-cli/wit`) | 0.2.0 | WASI specification, W3C Community Contributor License Agreement ([LICENSE-wasi](sdk/go/wit/deps/LICENSE-wasi)) |

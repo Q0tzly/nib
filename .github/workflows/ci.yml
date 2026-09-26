@@ -25,6 +25,9 @@ jobs:
       - run: cargo clippy --manifest-path plugins/Cargo.toml --workspace --target wasm32-wasip2 --locked -- -D warnings
       # Plugins' own unit tests, such as fuzzy matching, run natively.
       - run: cargo test --manifest-path plugins/Cargo.toml --workspace --locked
+      # The Go SDK carries a copy of the WIT, which has to match.
+      - run: diff api/wit/plugin.wit sdk/go/wit/deps/nib-plugin/plugin.wit
+      - run: test -z "$(gofmt -l sdk/go plugins/test/go)"
 
   test:
     strategy:
@@ -38,5 +41,16 @@ jobs:
         with:
           targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
+      # For the Go SDK's test plugin: TinyGo brings binaryen's wasm-opt, and
+      # makes components with wasm-tools.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - uses: acifani/setup-tinygo@v2
+        with:
+          tinygo-version: "0.42.0"
+      - uses: bytecodealliance/actions/wasm-tools/setup@v1
       - run: cargo xtask build-plugins
       - run: cargo test --workspace --locked
+        env:
+          NIB_REQUIRE_GO: "1"

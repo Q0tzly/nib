@@ -43,7 +43,7 @@ fn highlights_and_follows_edits() {
     assert_eq!(fg(&editor, 0, 1), KEYWORD);
     assert_eq!(fg(&editor, 3, 2), FUNCTION);
 
-    // Undo drops the tree; it is parsed again from scratch.
+    // Undo reaches the tree as one edit around what it changed.
     type_keys(&mut editor, "u");
     assert_eq!(fg(&editor, 0, 0), KEYWORD);
 
@@ -415,7 +415,7 @@ fn colors_code_blocks_in_their_language() {
     assert_eq!(fg(&editor, 0, 5), KEYWORD);
     assert_eq!(fg(&editor, 13, 5), COMMENT);
 
-    // Undo parses everything again.
+    // Undo reaches the injections too.
     type_keys(&mut editor, "uu");
     assert_eq!(fg(&editor, 0, 3), KEYWORD);
     assert_eq!(fg(&editor, 13, 3), Color::Reset);

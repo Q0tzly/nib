@@ -294,28 +294,54 @@ impl Buffer {
     pub fn undo(&mut self) -> Option<Change> {
         let before = self.text.clone();
         let (changes, selection) = self.history.undo(&mut self.text)?;
-        self.version += 1;
-        self.change_log
-            .push((self.version, text_changes(&before, &changes)));
-        self.map_decorations(&changes);
-        if let Some(syntax) = &mut self.syntax {
-            syntax.invalidate();
-        }
+        self.after_history(&before, &changes);
         Some(Change { changes, selection })
     }
 
     pub fn redo(&mut self) -> Option<Change> {
         let before = self.text.clone();
         let (changes, selection) = self.history.redo(&mut self.text)?;
-        self.version += 1;
-        self.change_log
-            .push((self.version, text_changes(&before, &changes)));
-        self.map_decorations(&changes);
-        if let Some(syntax) = &mut self.syntax {
-            syntax.invalidate();
-        }
+        self.after_history(&before, &changes);
         Some(Change { changes, selection })
     }
+
+    /// Records an undo or redo that turned `before` into the text now.
+    fn after_history(&mut self, before: &Rope, changes: &[ChangeSet]) {
+        self.version += 1;
+        self.change_log
+            .push((self.version, text_changes(before, changes)));
+        self.map_decorations(changes);
+        if let Some(syntax) = &mut self.syntax {
+            // The steps went through texts of their own; one edit around
+            // what differs keeps the tree, so colors stay while it is
+            // parsed again.
+            let (start, old_end, new_end) = differing(before, &self.text);
+            syntax.edit(before, &self.text, start, old_end, new_end);
+        }
+    }
+}
+
+/// Where `after` differs from `before`: the start, and the ends in each,
+/// between the parts at their starts and ends that are the same.
+fn differing(before: &Rope, after: &Rope) -> (usize, usize, usize) {
+    let prefix = before
+        .bytes()
+        .zip(after.bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let most = before.len_bytes().min(after.len_bytes()) - prefix;
+    let suffix = before
+        .bytes_at(before.len_bytes())
+        .reversed()
+        .zip(after.bytes_at(after.len_bytes()).reversed())
+        .take(most)
+        .take_while(|(a, b)| a == b)
+        .count();
+    (
+        prefix,
+        before.len_bytes() - suffix,
+        after.len_bytes() - suffix,
+    )
 }
 
 impl Buffer {
@@ -402,6 +428,15 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_what_differs() {
+        let rope = Rope::from_str;
+        assert_eq!(differing(&rope("abcdef"), &rope("abXYef")), (2, 4, 4));
+        assert_eq!(differing(&rope("abc"), &rope("abXc")), (2, 2, 3));
+        assert_eq!(differing(&rope("aaa"), &rope("aa")), (2, 3, 2));
+        assert_eq!(differing(&rope("same"), &rope("same")), (4, 4, 4));
+    }
 
     struct TempFile(PathBuf);
 

@@ -1,0 +1,19 @@
+[package]
+name = "{{name}}"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+nib-plugin = { git = "https://github.com/nib-editor/nib", tag = "{{rust_sdk_tag}}" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+
+# A workspace of its own, even when made inside another one.
+[workspace]

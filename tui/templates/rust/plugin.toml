@@ -1,0 +1,9 @@
+name = "{{name}}"
+version = "0.1.0"
+# The nib:plugin API it is built for; nib loads only plugins of its own.
+api = "{{api}}"
+# What it may do beyond the editor API: "process", "fs-read", "fs-write",
+# "network", "clipboard". Ask for what it uses and nothing else.
+capabilities = []
+# The events it gets in on_event.
+events = ["buffer-opened", "buffer-changed"]

@@ -1,0 +1,30 @@
+# Builds the plugin and publishes it as a release when a tag like v0.1.0 is
+# pushed, as `nib plugin add OWNER/REPO` expects: one *.nib.tar.gz with
+# plugin.toml and plugin.wasm at its root.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add wasm32-wasip2
+      - name: Build
+        run: |
+          cargo build --release --target wasm32-wasip2
+          cp target/wasm32-wasip2/release/{{crate}}.wasm plugin.wasm
+      - name: Check the tag matches plugin.toml
+        run: grep -qx "version = \"${GITHUB_REF_NAME#v}\"" plugin.toml
+      - name: Pack
+        run: tar czf "{{name}}-${GITHUB_REF_NAME#v}.nib.tar.gz" plugin.toml plugin.wasm
+      - name: Publish
+        run: gh release create "$GITHUB_REF_NAME" ./*.nib.tar.gz --title "$GITHUB_REF_NAME" --notes "{{name}} $GITHUB_REF_NAME"
+        env:
+          GH_TOKEN: ${{ github.token }}

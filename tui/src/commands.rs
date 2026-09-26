@@ -21,6 +21,7 @@ pub const USAGE: &str = "usage: nib [--plugin DIR]... [FILE]...
        nib plugin update [NAME]...     update installed plugins [--yes]
        nib plugin remove NAME          uninstall a plugin
        nib plugin pack DIR             make NAME-VERSION.nib.tar.gz from a built plugin
+       nib plugin new NAME [DIR]       start a plugin in Rust, or with --go in Go
        nib plugin build [DIR]          build plugin.wasm with cargo or TinyGo
        nib plugin test [DIR] [FILE]... run a plugin's tests/*.toml without a terminal";
 
@@ -43,7 +44,12 @@ pub fn config(args: &[OsString]) -> ExitCode {
 pub fn plugin(args: &[OsString]) -> ExitCode {
     let args: Vec<&str> = args.iter().filter_map(|a| a.to_str()).collect();
     let yes = args.contains(&"--yes");
-    let words: Vec<&str> = args.iter().copied().filter(|a| *a != "--yes").collect();
+    let go = args.contains(&"--go");
+    let words: Vec<&str> = args
+        .iter()
+        .copied()
+        .filter(|a| !["--yes", "--go"].contains(a))
+        .collect();
     let result = match words[..] {
         ["list"] => list(),
         ["search"] => search(""),
@@ -53,12 +59,24 @@ pub fn plugin(args: &[OsString]) -> ExitCode {
         ["remove", name] => with_store(|store| remove(store, name)),
         ["pack", dir] => install::pack(Path::new(dir), Path::new("."))
             .map(|file| println!("wrote {}", file.display())),
+        ["new", name] => new(name, None, go),
+        ["new", name, dir] => new(name, Some(Path::new(dir)), go),
         ["build"] => crate::pluginbuild::run(Path::new(".")),
         ["build", dir] => crate::pluginbuild::run(Path::new(dir)),
         ["test", ref rest @ ..] => test(rest),
         _ => Err(USAGE.to_string()),
     };
     finish(result)
+}
+
+fn new(name: &str, dir: Option<&Path>, go: bool) -> Result<(), String> {
+    let dir = crate::scaffold::run(name, dir, go)?;
+    println!(
+        "made {name} in {}; build and test it with\n\n  cd {}\n  nib plugin build\n  nib plugin test",
+        dir.display(),
+        dir.display()
+    );
+    Ok(())
 }
 
 /// `nib plugin test [DIR] [FILE]...`: the directory is the first word if

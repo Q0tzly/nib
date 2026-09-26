@@ -1,0 +1,28 @@
+# Tests for `nib plugin test`: each sets up a buffer, sends keys or calls a
+# command, and checks what came out. The format is in the "Testing" section
+# of https://github.com/nib-editor/nib/blob/main/sdk/README.md.
+
+[[test]]
+name = "shows the words in the status line"
+text = "one two three\n"
+
+[test.expect]
+screen = ["3 words"]
+
+[[test]]
+name = "counts again after an edit"
+# #[o|]# is a cursor on the o; keys are sent to the standard Helix keymap.
+text = "#[o|]#ne\n"
+keys = "itwo <esc>"
+
+[test.expect]
+text = "two one\n"
+screen = ["2 words"]
+
+[[test]]
+name = "answers its command"
+text = "one two\n"
+command = "{{name}}.count"
+
+[test.expect]
+result = "2"

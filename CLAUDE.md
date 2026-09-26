@@ -47,6 +47,7 @@ cargo test --workspace
 - SDK はエディタとは別にバージョンを付ける。`api/` が変わらない限り SDK のバージョンは上げない。例外は、Go のモジュールのパスが変わったときのように、打ち直さないと SDK を取れなくなるとき（パッチだけ上げる。`nib-editor` に移したときの `sdk/go/v0.4.1`）。
 - `api/wit/` を変えたら、同じコミットで WIT のパッケージのバージョン（`nib:plugin@X.Y.Z`）も SDK と同じ段だけ上げ、`メジャー.マイナー` が変わったら `core` の `API_VERSION` と全プラグインの `plugin.toml` の `api` も合わせる。プラグインの `api` が nib と違えば読み込まない。
 - Go SDK は `sdk/go/` に独自の `go.mod` を置き、タグは `sdk/go/vX.Y.Z` 形式にする。
+- Rust SDK は crates.io に出さず、タグ `sdk/rust/vX.Y.Z` で取らせる。SDK のバージョンを上げたら、そのタグを打ち、`nib plugin new` の雛形が指すバージョン（`tui/src/scaffold.rs` の `RUST_SDK_TAG` と `GO_SDK_VERSION`）も直す。`RUST_SDK_TAG` はテストが `sdk/rust/Cargo.toml` と比べる。
 
 ## 進め方
 

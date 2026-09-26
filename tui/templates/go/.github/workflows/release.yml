@@ -1,0 +1,39 @@
+# Builds the plugin and publishes it as a release when a tag like v0.1.0 is
+# pushed, as `nib plugin add OWNER/REPO` expects: one *.nib.tar.gz with
+# plugin.toml and plugin.wasm at its root.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      # TinyGo brings binaryen's wasm-opt, and makes components with
+      # wasm-tools.
+      - uses: acifani/setup-tinygo@v2
+        with:
+          tinygo-version: "0.42.0"
+      - uses: bytecodealliance/actions/wasm-tools/setup@v1
+      - name: Build
+        run: |
+          go mod download
+          sdk="$(go list -m -f '{{.Dir}}' github.com/nib-editor/nib/sdk/go)"
+          tinygo build -target=wasip2 --wit-package "$sdk/wit" --wit-world plugin -o plugin.wasm .
+      - name: Check the tag matches plugin.toml
+        run: grep -qx "version = \"${GITHUB_REF_NAME#v}\"" plugin.toml
+      - name: Pack
+        run: tar czf "{{name}}-${GITHUB_REF_NAME#v}.nib.tar.gz" plugin.toml plugin.wasm
+      - name: Publish
+        run: gh release create "$GITHUB_REF_NAME" ./*.nib.tar.gz --title "$GITHUB_REF_NAME" --notes "{{name}} $GITHUB_REF_NAME"
+        env:
+          GH_TOKEN: ${{ github.token }}

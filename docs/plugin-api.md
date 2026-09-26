@@ -462,7 +462,7 @@ interface process {
 
 ## SDK
 
-- **Rust**（`sdk/rust`、クレート `nib-plugin`）: wit-bindgen の生成コードを包み、`Plugin` トレイトと `export!` マクロを提供する。`wasm32-wasip2` 向けにビルドするだけで、コンポーネントが出来上がる。
+- **Rust**（`sdk/rust`、クレート `nib-plugin`）: wit-bindgen の生成コードを包み、`Plugin` トレイトと `export!` マクロを提供する。`wasm32-wasip2` 向けにビルドするだけで、コンポーネントが出来上がる。crates.io には出さず、リポジトリの外のプラグインは git のタグ `sdk/rust/vX.Y.Z` で取る（`nib-plugin = { git = "https://github.com/nib-editor/nib", tag = "sdk/rust/v0.4.2" }`）。
 - **Go**（`sdk/go`、モジュール `github.com/nib-editor/nib/sdk/go`）: M4.8 で作った。
   - 本家の Go（1.27）は `wasip1` までで、コンポーネント（`wasip2`）を作れない。TinyGo（0.42 以降）の `-target=wasip2` で作る。TinyGo は wasm の最適化とゴルーチンの仕組みのために binaryen の `wasm-opt` を、コンポーネントに包むために `wasm-tools` を使うので、それらも要る。
   - 型と関数は、wit-bindgen-go（Bytecode Alliance）で WIT から生成し、生成したコードをリポジトリに置く。利用者は生成の道具を持たなくてよい。`api/wit/` を変えたら、`go generate` で作り直す。

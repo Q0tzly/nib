@@ -4,6 +4,7 @@ mod draw;
 mod install;
 mod pluginbuild;
 mod plugintest;
+mod scaffold;
 mod settings;
 mod terminal;
 

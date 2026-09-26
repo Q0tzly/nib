@@ -79,7 +79,8 @@ fn startup_breakdown() {
         editor.load_plugin(&plugin_dir("helix")).unwrap();
         step("load helix");
         editor.load_plugin(&plugin_dir("rust")).unwrap();
-        step("load rust (grammar, query)");
+        editor.load_plugin(&plugin_dir("markdown")).unwrap();
+        step("load rust and markdown (registered, not compiled)");
         editor.open(&file).unwrap();
         step("open");
         let mut grid = Grid::default();
@@ -87,7 +88,12 @@ fn startup_breakdown() {
         step("first frame, without highlighting");
         editor.catch_up();
         editor.render(&mut grid);
-        step("load grammar, parse, and draw highlighted");
+        step("load rust, parse, and draw highlighted");
+        editor.catch_up();
+        editor.render(&mut grid);
+        step("load markdown, parse doc comments on screen, and draw");
+        editor.catch_up();
+        step("parse doc comments a screen away");
         println!("{round}: total {:?}", started.elapsed());
     }
     let _ = fs::remove_dir_all(&cache);

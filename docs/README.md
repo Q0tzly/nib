@@ -10,5 +10,6 @@
 | [keymap.md](keymap.md) | モーダルの扱い、キーマップをプラグインで実現するしくみ |
 | [lsp.md](lsp.md) | LSP プラグインの範囲、サーバーの設定、位置の数え方 |
 | [plugin-install.md](plugin-install.md) | プラグインの配布とインストール（`nib plugin search` / `add` / `update` / `remove`） |
+| [benchmarks.md](benchmarks.md) | vim と Helix との比べ方と結果、nib の起動の内訳、これまでの推移 |
 | [roadmap.md](roadmap.md) | マイルストーン |
 | adr/ | 個別の設計判断の記録（`NNNN-title.md`） |

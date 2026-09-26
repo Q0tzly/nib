@@ -2,7 +2,7 @@
 
 > ステータス: 合意済み（2026-09-25）
 
-各段階は、終えた時点で CI が通り、動くものを確かめられる状態にする。性能は段階ごとに [bench/latency.py](../bench/latency.py) で測り、[architecture.md](architecture.md) の目標と比べる。
+各段階は、終えた時点で CI が通り、動くものを確かめられる状態にする。性能は段階ごとに [bench/latency.py](../bench/latency.py) で測り、[architecture.md](architecture.md) の目標と比べる。結果は [benchmarks.md](benchmarks.md) に残す。
 
 ## M1 まで
 

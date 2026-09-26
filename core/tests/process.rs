@@ -43,6 +43,12 @@ fn shell(script: &str) -> String {
     }
 }
 
+/// A program that prints its input back, as `spawn` takes it. Windows'
+/// sort writes its output in another encoding, so it is not used.
+fn echo_input() -> &'static str {
+    if cfg!(windows) { "findstr\n^" } else { "cat" }
+}
+
 #[test]
 fn programs_report_output_and_exit() {
     let mut editor = editor_with(&["test-events"]);
@@ -63,14 +69,16 @@ fn programs_report_output_and_exit() {
 #[test]
 fn programs_read_what_plugins_write() {
     let mut editor = editor_with(&["test-events"]);
-    let id = editor.call_command("test-events.spawn", "sort").unwrap();
+    let id = editor
+        .call_command("test-events.spawn", echo_input())
+        .unwrap();
     editor
         .call_command("test-events.write", &format!("{id} b\na\n"))
         .unwrap();
     editor.call_command("test-events.close", &id).unwrap();
     assert_eq!(
         wait_for_exit(&mut editor),
-        format!("exit {id} Some(0) stdout=a|b stderr=")
+        format!("exit {id} Some(0) stdout=b|a stderr=")
     );
 }
 
@@ -78,7 +86,9 @@ fn programs_read_what_plugins_write() {
 fn killed_programs_still_report_their_exit() {
     let mut editor = editor_with(&["test-events"]);
     // Waits for input that never comes.
-    let id = editor.call_command("test-events.spawn", "sort").unwrap();
+    let id = editor
+        .call_command("test-events.spawn", echo_input())
+        .unwrap();
     editor.call_command("test-events.kill", &id).unwrap();
     let exit = wait_for_exit(&mut editor);
     assert!(exit.starts_with(&format!("exit {id} ")), "{exit}");

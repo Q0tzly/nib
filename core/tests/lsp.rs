@@ -20,7 +20,12 @@ use common::{plugin_dir, screen, type_keys};
 
 fn main() {
     if env::args().any(|arg| arg == "--fake-lsp") {
-        fake_server();
+        fake_server(false);
+        return;
+    }
+    // Gives diagnostics only when asked, as rust-analyzer does for its own.
+    if env::args().any(|arg| arg == "--fake-lsp-pull") {
+        fake_server(true);
         return;
     }
     // A server that is not really there, as rustup's proxy when the
@@ -29,8 +34,12 @@ fn main() {
         eprintln!("\nerror: not installed\nmore detail");
         process::exit(1);
     }
-    let tests: [(&str, fn()); 7] = [
+    let tests: [(&str, fn()); 8] = [
         ("diagnostics_follow_edits", diagnostics_follow_edits),
+        (
+            "diagnostics_asked_for_follow_edits",
+            diagnostics_asked_for_follow_edits,
+        ),
         (
             "hover_shows_until_the_next_key",
             hover_shows_until_the_next_key,
@@ -117,7 +126,20 @@ fn cursor(editor: &Editor) -> usize {
 }
 
 fn diagnostics_follow_edits() {
-    let (mut editor, dir) = fake("diagnostics", "fn main() {}\nlet error = 1;\n");
+    check_diagnostics("--fake-lsp");
+}
+
+fn diagnostics_asked_for_follow_edits() {
+    check_diagnostics("--fake-lsp-pull");
+}
+
+fn check_diagnostics(server: &str) {
+    let exe = env::current_exe().unwrap().to_string_lossy().into_owned();
+    let (mut editor, dir) = editor(
+        &format!("diagnostics{server}"),
+        "fn main() {}\nlet error = 1;\n",
+        &[exe, server.into()],
+    );
     wait_until(&mut editor, "the diagnostic", |e| shows(e, "found error"));
     let rows = screen(&editor);
     assert!(
@@ -209,7 +231,7 @@ fn completes_on_its_own_and_narrows() {
 }
 
 /// A language server that knows just enough for the tests.
-fn fake_server() {
+fn fake_server(pull: bool) {
     let mut input = BufReader::new(io::stdin().lock());
     let mut documents: HashMap<String, String> = HashMap::new();
     while let Some(message) = read_message(&mut input) {
@@ -226,12 +248,23 @@ fn fake_server() {
                     "textDocumentSync": 2,
                     "hoverProvider": true,
                     "definitionProvider": true,
+                    "diagnosticProvider": if pull {
+                        json!({"interFileDependencies": false, "workspaceDiagnostics": false})
+                    } else {
+                        Value::Null
+                    },
                 }}),
             ),
+            "textDocument/diagnostic" => {
+                let items = diagnostics(documents.get(&uri).map_or("", String::as_str));
+                reply(&message, json!({"kind": "full", "items": items}));
+            }
             "textDocument/didOpen" => {
                 let text = params["textDocument"]["text"].as_str().unwrap_or_default();
                 documents.insert(uri.clone(), text.to_string());
-                publish(&uri, &documents[&uri]);
+                if !pull {
+                    publish(&uri, &documents[&uri]);
+                }
             }
             "textDocument/didChange" => {
                 let text = documents.entry(uri.clone()).or_default();
@@ -246,7 +279,9 @@ fn fake_server() {
                         None => *text = new.to_string(),
                     }
                 }
-                publish(&uri, &documents[&uri]);
+                if !pull {
+                    publish(&uri, &documents[&uri]);
+                }
             }
             "textDocument/hover" => {
                 let at = &params["position"];
@@ -316,8 +351,16 @@ fn reply(request: &Value, result: Value) {
 }
 
 fn publish(uri: &str, text: &str) {
-    let diagnostics: Vec<Value> = text
-        .lines()
+    send(&json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/publishDiagnostics",
+        "params": {"uri": uri, "diagnostics": diagnostics(text)},
+    }));
+}
+
+/// A diagnostic at every "error".
+fn diagnostics(text: &str) -> Vec<Value> {
+    text.lines()
         .enumerate()
         .filter_map(|(line, content)| {
             let character = content.find("error")?;
@@ -330,12 +373,7 @@ fn publish(uri: &str, text: &str) {
                 "message": "found error",
             }))
         })
-        .collect();
-    send(&json!({
-        "jsonrpc": "2.0",
-        "method": "textDocument/publishDiagnostics",
-        "params": {"uri": uri, "diagnostics": diagnostics},
-    }));
+        .collect()
 }
 
 /// The byte offset of an LSP position counted in bytes.

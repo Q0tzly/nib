@@ -40,6 +40,9 @@ const STDERR_KEPT: usize = 4096;
 const COMPLETION_ROWS: usize = 10;
 /// How long typing pauses before completions are asked for on their own.
 const COMPLETION_DELAY_MS: u32 = 150;
+/// How long typing pauses before diagnostics are asked for again, from
+/// servers that give them when asked.
+const PULL_DELAY_MS: u32 = 200;
 
 struct Server {
     language: String,
@@ -56,6 +59,9 @@ struct Server {
     utf8: bool,
     /// Takes changes as edits rather than whole texts.
     incremental: bool,
+    /// Gives diagnostics when asked (`textDocument/diagnostic`), besides
+    /// sending them.
+    pull: bool,
     /// Documents open on the server, by URI.
     opened: HashSet<String>,
     /// Documents to open once it is initialized.
@@ -67,6 +73,14 @@ enum Request {
     Hover { uri: String, offset: u64 },
     Definition,
     Completion { uri: String, start: u64, auto: bool },
+    Diagnostics { uri: String },
+}
+
+/// Diagnostics of one file from one way of getting them, and whether their
+/// positions count bytes.
+struct Diagnostics {
+    utf8: bool,
+    items: Vec<Value>,
 }
 
 struct Completion {
@@ -88,8 +102,15 @@ struct Lsp {
     /// Languages whose server could not start or stopped; not tried again.
     failed: HashSet<String>,
     cwd: String,
+    /// Diagnostics by URI, as servers sent them and as they answered when
+    /// asked; shown together.
+    pushed: HashMap<String, Diagnostics>,
+    pulled: HashMap<String, Diagnostics>,
     /// Diagnostics per severity, by URI, for the status line.
     counts: HashMap<String, [usize; 4]>,
+    /// Files to ask diagnostics for once typing pauses, and the timer.
+    pull_waiting: HashSet<String>,
+    pull_timer: Option<u64>,
     /// Closed by the next key.
     hover: Option<Popup>,
     completion: Option<Completion>,
@@ -148,7 +169,11 @@ impl Guest for Plugin {
                 servers: Vec::new(),
                 failed: HashSet::new(),
                 cwd: editor::working_directory(),
+                pushed: HashMap::new(),
+                pulled: HashMap::new(),
                 counts: HashMap::new(),
+                pull_waiting: HashSet::new(),
+                pull_timer: None,
                 hover: None,
                 completion: None,
                 layer: false,
@@ -231,6 +256,12 @@ impl Guest for Plugin {
                     }
                 }
             }
+            Event::Timer(id) if lsp.pull_timer == Some(id) => {
+                lsp.pull_timer = None;
+                for uri in std::mem::take(&mut lsp.pull_waiting) {
+                    lsp.pull(&uri);
+                }
+            }
             Event::Timer(id) => {
                 if lsp.timer == Some(id) {
                     lsp.timer = None;
@@ -276,6 +307,7 @@ impl Lsp {
             ready: false,
             utf8: false,
             incremental: false,
+            pull: false,
             opened: HashSet::new(),
             waiting: Vec::new(),
         });
@@ -295,6 +327,7 @@ impl Lsp {
                     "hover": {"contentFormat": ["plaintext", "markdown"]},
                     "definition": {"linkSupport": true},
                     "publishDiagnostics": {},
+                    "diagnostic": {"dynamicRegistration": false},
                 },
                 "workspace": {"workspaceFolders": true, "configuration": true},
                 "window": {"workDoneProgress": false},
@@ -349,6 +382,34 @@ impl Lsp {
             "contentChanges": changes,
         });
         server.notify("textDocument/didChange", params);
+        if server.pull {
+            self.pull_later(uri);
+        }
+    }
+
+    /// Asks for `uri`'s diagnostics once typing pauses.
+    fn pull_later(&mut self, uri: String) {
+        self.pull_waiting.insert(uri);
+        if self.pull_timer.is_none() {
+            self.pull_timer = Some(timers::set(PULL_DELAY_MS));
+        }
+    }
+
+    /// Asks the server that has `uri` open for its diagnostics, if it gives
+    /// them when asked.
+    fn pull(&mut self, uri: &str) {
+        let Some(server) = self
+            .servers
+            .iter_mut()
+            .find(|s| s.pull && s.opened.contains(uri))
+        else {
+            return;
+        };
+        let params = json!({"textDocument": {"uri": uri}});
+        let request = Request::Diagnostics {
+            uri: uri.to_string(),
+        };
+        server.request("textDocument/diagnostic", params, request);
     }
 
     fn saved(&mut self, buffer: &Buffer) {
@@ -405,6 +466,15 @@ impl Lsp {
                         let items = message["params"]["items"].as_array().map_or(0, Vec::len);
                         Value::Array(vec![Value::Null; items])
                     }
+                    // Its diagnostics may have changed without an edit, such
+                    // as after another file changed.
+                    "workspace/diagnostic/refresh" => {
+                        let open: Vec<String> = self.servers[i].opened.iter().cloned().collect();
+                        for uri in open {
+                            self.pull_later(uri);
+                        }
+                        Value::Null
+                    }
                     _ => Value::Null,
                 };
                 self.servers[i].send(&json!({"jsonrpc": "2.0", "id": id, "result": result}));
@@ -429,7 +499,20 @@ impl Lsp {
 
     fn notification(&mut self, i: usize, method: &str, params: &Value) {
         match method {
-            "textDocument/publishDiagnostics" => self.diagnostics(i, params),
+            "textDocument/publishDiagnostics" => {
+                let Some(uri) = params["uri"].as_str() else {
+                    return;
+                };
+                let diagnostics = Diagnostics {
+                    utf8: self.servers[i].utf8,
+                    items: params["diagnostics"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default(),
+                };
+                self.pushed.insert(uri.to_string(), diagnostics);
+                self.show_diagnostics(uri);
+            }
             // Errors and warnings only; the rest is chatter.
             "window/showMessage" if params["type"].as_u64().is_some_and(|t| t <= 2) => {
                 let text = params["message"].as_str().unwrap_or_default();
@@ -449,12 +532,14 @@ impl Lsp {
                 let sync = &capabilities["textDocumentSync"];
                 let kind = sync.as_u64().or_else(|| sync["change"].as_u64());
                 server.incremental = kind == Some(2);
+                server.pull = !capabilities["diagnosticProvider"].is_null();
                 server.ready = true;
                 server.notify("initialized", json!({}));
                 let waiting = std::mem::take(&mut server.waiting);
                 for uri in waiting {
                     if let Some(buffer) = self.buffer(&uri) {
                         self.servers[i].open(&uri, &buffer);
+                        self.pull(&uri);
                     }
                 }
             }
@@ -464,19 +549,32 @@ impl Lsp {
                 let language = self.servers[i].language.clone();
                 self.show_completions(uri, start, language, auto, result);
             }
+            Request::Diagnostics { uri } => {
+                // "unchanged" keeps what was shown.
+                if result["kind"] == "full" {
+                    let diagnostics = Diagnostics {
+                        utf8: self.servers[i].utf8,
+                        items: result["items"].as_array().cloned().unwrap_or_default(),
+                    };
+                    self.pulled.insert(uri.clone(), diagnostics);
+                    self.show_diagnostics(&uri);
+                }
+            }
         }
     }
 
-    fn diagnostics(&mut self, i: usize, params: &Value) {
-        let Some(uri) = params["uri"].as_str() else {
-            return;
-        };
-        let utf8 = self.servers[i].utf8;
+    /// Shows `uri`'s diagnostics, sent and asked for together.
+    fn show_diagnostics(&mut self, uri: &str) {
         let mut counts = [0; 4];
         let mut decorations = Vec::new();
         let mut notes = Vec::new();
         let buffer = self.buffer(uri);
-        for diagnostic in params["diagnostics"].as_array().into_iter().flatten() {
+        let all = [self.pushed.get(uri), self.pulled.get(uri)];
+        let items = all
+            .into_iter()
+            .flatten()
+            .flat_map(|d| d.items.iter().map(move |item| (d.utf8, item)));
+        for (utf8, diagnostic) in items {
             let severity = diagnostic["severity"]
                 .as_u64()
                 .map_or(0, |s| (s.clamp(1, 4) - 1) as usize);

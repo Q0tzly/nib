@@ -33,6 +33,16 @@ command = ["pyright-langserver", "--stdio"]
 - サーバーは、その言語のファイルを初めて開いたときに起動する。起動できなければ、その言語では一度だけメッセージを出して、以降は起動を試みない。
 - サーバーは言語ごとに 1 つ。ルートはエディタの作業ディレクトリ（`editor.working-directory`）。
 
+## 診断の受け取り方
+
+診断には 2 つの受け取り方があり、両方に対応する。
+
+- push: サーバーが `textDocument/publishDiagnostics` で送ってくる。
+- pull: サーバーが初期化の応答で `diagnosticProvider` を返したら、クライアントが `textDocument/diagnostic` で取りに行く。rust-analyzer は、型の誤りのような自分で見つけた診断をこちらで返す（`cargo check` の結果は push で送ってくる）。
+  - 開いたときと、編集が 200 ms 止まったときに取りに行く。打つたびに要求しないよう、タイマーで待つ。
+  - サーバーから `workspace/diagnostic/refresh` を頼まれたら、開いているファイルすべてについて取り直す。
+- push と pull の結果はファイルごとに別々に持ち、合わせて表示する。片方が来ても、もう片方は消さない。
+
 ## 位置の数え方
 
 - 初期化で `positionEncodings` に `utf-8` と `utf-16` を挙げる。サーバーが `utf-8` を選べば、コアの位置（バイト）をそのまま使う。

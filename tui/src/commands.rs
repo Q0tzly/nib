@@ -20,7 +20,8 @@ pub const USAGE: &str = "usage: nib [--plugin DIR]... [FILE]...
        nib plugin add SOURCE [--yes]   install by name, or from owner/repo[@tag], a URL, or a file
        nib plugin update [NAME]...     update installed plugins [--yes]
        nib plugin remove NAME          uninstall a plugin
-       nib plugin pack DIR             make NAME-VERSION.nib.tar.gz from a built plugin";
+       nib plugin pack DIR             make NAME-VERSION.nib.tar.gz from a built plugin
+       nib plugin test [DIR] [FILE]... run a plugin's tests/*.toml without a terminal";
 
 pub fn config(args: &[OsString]) -> ExitCode {
     let Some(dir) = settings::config_dir() else {
@@ -51,9 +52,21 @@ pub fn plugin(args: &[OsString]) -> ExitCode {
         ["remove", name] => with_store(|store| remove(store, name)),
         ["pack", dir] => install::pack(Path::new(dir), Path::new("."))
             .map(|file| println!("wrote {}", file.display())),
+        ["test", ref rest @ ..] => test(rest),
         _ => Err(USAGE.to_string()),
     };
     finish(result)
+}
+
+/// `nib plugin test [DIR] [FILE]...`: the directory is the first word if
+/// it is one, else the current one.
+fn test(words: &[&str]) -> Result<(), String> {
+    let (dir, files) = match words {
+        [first, rest @ ..] if Path::new(first).is_dir() => (Path::new(*first), rest),
+        files => (Path::new("."), files),
+    };
+    let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
+    crate::plugintest::run(dir, &files)
 }
 
 fn with_store(f: impl FnOnce(&Store) -> Result<(), String>) -> Result<(), String> {

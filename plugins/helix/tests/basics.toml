@@ -1,0 +1,44 @@
+# Run with `nib plugin test target/plugins/helix plugins/helix/tests/basics.toml`
+# after `cargo xtask build-plugins`; tui/tests/plugin_test.rs does.
+
+[[test]]
+name = "insert mode puts text before the cursor"
+text = "#[w|]#orld\n"
+keys = "ihello <esc>"
+
+[test.expect]
+selections = "hello #[w|]#orld\n"
+screen = ["NOR"]
+
+[[test]]
+name = "w selects a word and the space after it"
+file = "main.rs"
+text = "#[f|]#n main() {}\n"
+keys = "w"
+
+[test.expect]
+selections = "#[fn |]#main() {}\n"
+
+[[test]]
+name = "x extends to lines and d deletes them"
+text = "#[o|]#ne\ntwo\nthree\n"
+keys = "xxd"
+
+[test.expect]
+selections = "#[t|]#hree\n"
+
+[[test]]
+name = "u undoes"
+text = "#[a|]#bc\n"
+keys = "du"
+
+[test.expect]
+text = "abc\n"
+
+[[test]]
+name = "the core saves"
+text = "abc\n"
+command = "buffer.save"
+
+[test.expect]
+result = "null"

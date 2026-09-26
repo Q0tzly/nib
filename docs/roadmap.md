@@ -329,6 +329,8 @@ M3 を終えた時点で、git のエディタ（`core.editor`）を hx から n
 
 ### M5.1 端末なしのテスト
 
+> 完了（2026-09-27）。helix プラグインのテストを `plugins/helix/tests/basics.toml` に書き、`tui/tests/plugin_test.rs` から回す。テストごとに標準プラグインを読み込み直しても、release のビルドで 1 テスト約 10 ms（コンパイル結果のキャッシュあり）。
+
 - キーの並びの記法と、選択の印（Helix のテストの `#[h|]#`）の読み書き
 - `nib plugin test`: プラグインの `tests/*.toml` を、標準プラグインと一緒に端末なしで実行する
 

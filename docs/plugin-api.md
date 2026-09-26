@@ -437,12 +437,12 @@ interface process {
 
 - `nib:plugin` は semver で管理する。1.0 までは互換性を保証しない。
 - コアが対応するのは 1 つのバージョンだけ。標準プラグインは同じリポジトリにあるので、API を変えるときは同じコミットで直す。
-- SDK のバージョンは、`nib:plugin` のバージョンが変わったときだけ上げる。
+- SDK のバージョンは、`nib:plugin` のバージョンが変わったときだけ上げる。例外は、Go のモジュールのパスが変わったときのようにタグを打ち直さないと SDK を取れなくなるときで、パッチだけを上げる（下の「SDK」の Go）。
 
 ## SDK
 
 - **Rust**（`sdk/rust`、クレート `nib-plugin`）: wit-bindgen の生成コードを包み、`Plugin` トレイトと `export!` マクロを提供する。`wasm32-wasip2` 向けにビルドするだけで、コンポーネントが出来上がる。
-- **Go**（`sdk/go`、モジュール `github.com/nib-editor/nib/sdk/go`）: M4.8 で作る。
+- **Go**（`sdk/go`、モジュール `github.com/nib-editor/nib/sdk/go`）: M4.8 で作った。
   - 本家の Go（1.27）は `wasip1` までで、コンポーネント（`wasip2`）を作れない。TinyGo（0.42 以降）の `-target=wasip2` で作る。TinyGo は wasm の最適化とゴルーチンの仕組みのために binaryen の `wasm-opt` を、コンポーネントに包むために `wasm-tools` を使うので、それらも要る。
   - 型と関数は、wit-bindgen-go（Bytecode Alliance）で WIT から生成し、生成したコードをリポジトリに置く。利用者は生成の道具を持たなくてよい。`api/wit/` を変えたら、`go generate` で作り直す。
   - 生成したままの形は書きにくい（戻り値が `cm.Result` など）ので、薄いパッケージ `nib` をかぶせる。`nib.Plugin` インターフェースを実装して `nib.Register` に渡すだけで、4 つの関数（`init`、`handle-key`、`run-command`、`on-event`）がつながる。使わない関数は `nib.Base` を埋め込めば省ける。
@@ -456,7 +456,8 @@ tinygo build -target=wasip2 \
   --wit-world plugin -o plugin.wasm .
 ```
 
-  - バージョンは Rust の SDK と同じく API に合わせ、`v0.4.x` から始める。タグは `sdk/go/vX.Y.Z`。
+  - バージョンは Rust の SDK と同じく API に合わせ、`v0.4.0` から始めた。タグは `sdk/go/vX.Y.Z`。
+  - リポジトリを `nib-editor` に移したとき、モジュールのパスが `github.com/q0tzly/nib/sdk/go` から変わったので、API は同じまま `v0.4.1` を出した。Go は、タグの go.mod に書かれたパスが取りに行ったパスと違うと使えないため、古いタグ（`v0.4.0`）は新しいパスでは取れない。
 
 ## 作る順番
 

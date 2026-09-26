@@ -11,3 +11,7 @@
 
 ((plus_metadata) @injection.content
  (#set! injection.language "toml"))
+
+; The inline elements, in their own grammar.
+([(inline) (pipe_table_cell)] @injection.content
+ (#set! injection.language "markdown_inline"))

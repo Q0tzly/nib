@@ -494,3 +494,50 @@ fn injections_come_after_the_first_colors() {
     assert!(!editor.catch_up());
     fs::remove_file(&path).unwrap();
 }
+
+fn cell_style(editor: &Editor, x: u16, y: u16) -> nib_core::Style {
+    let mut grid = Grid::default();
+    editor.render(&mut grid);
+    grid.cell(x, y).style
+}
+
+#[test]
+fn inline_elements_have_their_own_grammar() {
+    let text = "# A `b`\n\nx `code` *em* **strong**\n\n| `c` |\n|---|\n";
+    let (mut editor, path) = editor_with(&["markdown"], "inline.md", text);
+    assert_eq!(fg(&editor, 2, 0), TITLE);
+    assert_eq!(fg(&editor, 5, 0), LITERAL, "code in a heading");
+    assert_eq!(fg(&editor, 0, 2), Color::Reset);
+    assert_eq!(fg(&editor, 4, 2), LITERAL);
+    assert!(cell_style(&editor, 11, 2).italic);
+    assert!(cell_style(&editor, 18, 2).bold);
+    assert_eq!(fg(&editor, 3, 4), LITERAL, "code in a table cell");
+
+    // Typing into a paragraph parses its inline elements again.
+    type_keys(&mut editor, "jjA `y`<esc>");
+    assert_eq!(fg(&editor, 27, 2), LITERAL);
+    fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn doc_comments_have_inline_elements() {
+    let text = "/// Uses `code`.\nfn f() {}\n";
+    let (editor, path) = editor_with(&["rust", "markdown"], "inline.rs", text);
+    assert_eq!(fg(&editor, 0, 0), COMMENT);
+    assert_eq!(fg(&editor, 10, 0), LITERAL);
+    fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn layers_far_from_the_screen_wait_until_it_comes() {
+    let text = format!("{}```rust\nfn far() {{}}\n```\n", "text\n".repeat(100));
+    let (mut editor, path) = editor_with(&["markdown", "rust"], "far.md", &text);
+    type_keys(&mut editor, "ge");
+    let row = screen(&editor).iter().position(|r| r.starts_with("fn far"));
+    assert_eq!(fg(&editor, 0, row.unwrap() as u16), KEYWORD);
+    // And edits far from the screen still reach them.
+    type_keys(&mut editor, "ggO<ret><esc>ge");
+    let row = screen(&editor).iter().position(|r| r.starts_with("fn far"));
+    assert_eq!(fg(&editor, 0, row.unwrap() as u16), KEYWORD);
+    fs::remove_file(&path).unwrap();
+}

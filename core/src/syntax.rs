@@ -2,7 +2,7 @@
 //! plugins provide; parsing and highlighting stay in the core because every
 //! plugin shares them and they run on every edit and frame.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -95,7 +95,10 @@ struct Layer {
     language: usize,
     /// Sorted and apart; never empty.
     ranges: Vec<TsRange>,
-    tree: Tree,
+    /// Only near the screen: a Markdown file has a layer for every
+    /// paragraph, and parsing them all, or telling them all about every
+    /// edit, takes milliseconds.
+    tree: Option<Tree>,
     /// An edit reached into `ranges` since the layer was parsed.
     touched: bool,
     injections: Injections,
@@ -122,6 +125,13 @@ struct Injection {
 }
 
 impl Injection {
+    fn key(&self) -> LayerKey {
+        match self.combined {
+            Some(pattern) => LayerKey::Combined(pattern, self.language),
+            None => LayerKey::At(self.language, self.ranges[0].start_byte),
+        }
+    }
+
     fn span(&self) -> (usize, usize) {
         let last = self.ranges.last().expect("never empty");
         (self.ranges[0].start_byte, last.end_byte)
@@ -146,25 +156,27 @@ enum LayerKey {
     Combined(usize, usize),
 }
 
-/// The layers that `found` makes: one for each match, but one for all the
-/// matches of a combined pattern and language.
-fn group(found: &[Injection]) -> Vec<(LayerKey, usize, Vec<TsRange>)> {
+/// The layers that `found` makes, of those with the keys `only` if given:
+/// one for each match, but one for all the matches of a combined pattern
+/// and language.
+fn group(
+    found: &[Injection],
+    only: Option<&HashSet<LayerKey>>,
+) -> Vec<(LayerKey, usize, Vec<TsRange>)> {
     let mut layers = Vec::new();
     let mut combined: Vec<(LayerKey, usize, Vec<TsRange>)> = Vec::new();
     for injection in found {
+        let key = injection.key();
+        if only.is_some_and(|only| !only.contains(&key)) {
+            continue;
+        }
         let (language, ranges) = (injection.language, injection.ranges.iter().copied());
-        match injection.combined {
-            None => {
-                let key = LayerKey::At(language, injection.ranges[0].start_byte);
-                layers.push((key, language, ranges.collect()));
-            }
-            Some(pattern) => {
-                let key = LayerKey::Combined(pattern, language);
-                match combined.iter_mut().find(|(k, _, _)| *k == key) {
-                    Some((_, _, all)) => all.extend(ranges),
-                    None => combined.push((key, language, ranges.collect())),
-                }
-            }
+        match key {
+            LayerKey::At(..) => layers.push((key, language, ranges.collect())),
+            LayerKey::Combined(..) => match combined.iter_mut().find(|(k, _, _)| *k == key) {
+                Some((_, _, all)) => all.extend(ranges),
+                None => combined.push((key, language, ranges.collect())),
+            },
         }
     }
     for (key, language, mut ranges) in combined {
@@ -360,24 +372,91 @@ impl Languages {
         Ok(())
     }
 
-    /// Finds and parses the injections the first parse left for later.
-    /// Returns whether there were any.
-    pub fn inject_pending(&mut self, syntax: &mut BufferSyntax, text: &Rope) -> bool {
-        if !syntax.injections_pending {
-            return false;
-        }
-        syntax.injections_pending = false;
+    /// Finds the injections the first parse left for later, then parses
+    /// the layers in `view`. Returns whether it parsed any.
+    pub fn update_injections(
+        &mut self,
+        syntax: &mut BufferSyntax,
+        text: &Rope,
+        view: &[Range<usize>],
+    ) -> bool {
         let Some(tree) = &syntax.tree else {
             return false;
         };
-        let found = Found {
-            tree,
-            host: &[],
-            regions: None,
+        if syntax.injections_pending {
+            syntax.injections_pending = false;
+            let found = Found {
+                tree,
+                host: &[],
+                regions: None,
+            };
+            let (language, injections) = (syntax.language, &mut syntax.injections);
+            self.inject(language, found, text, injections, None, 1);
+        }
+        self.fill(&mut syntax.injections, text, view, None, 1)
+    }
+
+    /// Parses the layers `near` the screen ahead of time, and drops the
+    /// trees of those outside `keep`.
+    pub fn prefetch_injections(
+        &mut self,
+        syntax: &mut BufferSyntax,
+        text: &Rope,
+        near: &[Range<usize>],
+        keep: &[Range<usize>],
+    ) {
+        self.fill(&mut syntax.injections, text, near, Some(keep), 1);
+    }
+
+    fn fill(
+        &mut self,
+        injections: &mut Injections,
+        text: &Rope,
+        wanted: &[Range<usize>],
+        keep: Option<&[Range<usize>]>,
+        depth: usize,
+    ) -> bool {
+        let in_any = |layer: &Layer, ranges: &[Range<usize>]| {
+            ranges.iter().any(|r| overlaps(&layer.ranges, r))
         };
-        let (language, injections) = (syntax.language, &mut syntax.injections);
-        self.inject(language, found, text, injections, None, 1);
-        !injections.layers.is_empty()
+        let mut parsed = false;
+        for layer in &mut injections.layers {
+            if keep.is_some_and(|keep| !in_any(layer, keep)) {
+                if layer.tree.take().is_some() {
+                    layer.injections = Injections::default();
+                }
+                continue;
+            }
+            if !in_any(layer, wanted) {
+                continue;
+            }
+            if layer.tree.is_none() {
+                // A grammar that fails to load was reported when a file of
+                // its own type was opened, or will be; here it just shows as
+                // text.
+                let Ok(Some(tree)) = self.parse_in(layer.language, text, &layer.ranges, None)
+                else {
+                    continue;
+                };
+                let found = Found {
+                    tree: &tree,
+                    host: &layer.ranges,
+                    regions: None,
+                };
+                self.inject(
+                    layer.language,
+                    found,
+                    text,
+                    &mut layer.injections,
+                    None,
+                    depth + 1,
+                );
+                layer.tree = Some(tree);
+                parsed = true;
+            }
+            parsed |= self.fill(&mut layer.injections, text, wanted, keep, depth + 1);
+        }
+        parsed
     }
 
     /// Parses only `ranges` of `text`, or all of it if there are none.
@@ -409,7 +488,8 @@ impl Languages {
 
     /// Brings the injections of a tree of `language` up to date: looks for
     /// them again where the tree changed, keeps the layers whose text did
-    /// not change, and parses the others again from their old trees.
+    /// not change, and parses the others again from their old trees if they
+    /// have them. `fill` parses the rest once they come near the screen.
     fn inject(
         &mut self,
         language: usize,
@@ -422,19 +502,31 @@ impl Languages {
         if depth > MAX_DEPTH {
             return;
         }
-        self.find_injections(language, &found, text, &mut injections.found);
-        let mut old: HashMap<LayerKey, Layer> = std::mem::take(&mut injections.layers)
-            .into_iter()
-            .map(|layer| {
-                // Where it starts moved along with the edits.
-                let key = match layer.key {
-                    LayerKey::At(language, _) => LayerKey::At(language, layer.ranges[0].start_byte),
-                    key => key,
-                };
-                (key, layer)
-            })
-            .collect();
-        for (key, language, ranges) in group(&injections.found) {
+        let changed = self.find_injections(language, &found, text, &mut injections.found);
+        if changed.as_ref().is_some_and(HashSet::is_empty) {
+            return;
+        }
+        // Only the layers that changed are taken apart; a Markdown file has
+        // thousands.
+        let mut old = HashMap::new();
+        let mut i = 0;
+        while i < injections.layers.len() {
+            let layer = &mut injections.layers[i];
+            // Where it starts moved along with the edits.
+            if let LayerKey::At(language, _) = layer.key {
+                layer.key = LayerKey::At(language, layer.ranges[0].start_byte);
+            }
+            if changed.as_ref().is_some_and(|c| !c.contains(&layer.key)) {
+                i += 1;
+                continue;
+            }
+            let layer = injections.layers.swap_remove(i);
+            old.insert(layer.key, layer);
+        }
+        let mut grouped = group(&injections.found, changed.as_ref());
+        // Switching between grammars costs, so each is parsed in a run.
+        grouped.sort_by_key(|(_, language, _)| *language);
+        for (key, language, ranges) in grouped {
             let old = old.remove(&key);
             let unchanged = old
                 .as_ref()
@@ -445,33 +537,37 @@ impl Languages {
                 injections.layers.push(layer);
                 continue;
             }
-            let (old_tree, mut inner) = match old {
-                Some(mut layer) => {
-                    mark_range_changes(&mut layer.tree, &layer.ranges, &ranges);
-                    (Some(layer.tree), layer.injections)
-                }
-                None => (None, Injections::default()),
-            };
-            // A grammar that fails to load was reported when a file of its
-            // own type was opened, or will be; here it just shows as text.
-            let Ok(Some(tree)) = self.parse_in(language, text, &ranges, old_tree.as_ref()) else {
-                continue;
-            };
-            let regions = old_tree.map(|old| changed_regions(&old, &tree, edited.cloned()));
-            let found = Found {
-                tree: &tree,
-                host: &ranges,
-                regions: regions.as_deref(),
-            };
-            self.inject(language, found, text, &mut inner, edited, depth + 1);
-            injections.layers.push(Layer {
+            let mut layer = Layer {
                 key,
                 language,
                 ranges,
-                tree,
+                tree: None,
                 touched: false,
-                injections: inner,
-            });
+                injections: Injections::default(),
+            };
+            if let Some(Layer {
+                tree: Some(mut old_tree),
+                ranges: old_ranges,
+                injections: mut inner,
+                ..
+            }) = old
+            {
+                mark_range_changes(&mut old_tree, &old_ranges, &layer.ranges);
+                if let Ok(Some(tree)) =
+                    self.parse_in(language, text, &layer.ranges, Some(&old_tree))
+                {
+                    let regions = changed_regions(&old_tree, &tree, edited.cloned());
+                    let found = Found {
+                        tree: &tree,
+                        host: &layer.ranges,
+                        regions: Some(&regions),
+                    };
+                    self.inject(language, found, text, &mut inner, edited, depth + 1);
+                    layer.tree = Some(tree);
+                    layer.injections = inner;
+                }
+            }
+            injections.layers.push(layer);
         }
     }
 
@@ -481,24 +577,26 @@ impl Languages {
     /// `@injection.content` and `@injection.language`, and the settings
     /// `injection.language`, `injection.combined`, and
     /// `injection.include-children`.
+    /// Returns the keys of the layers that changed, or `None` if all may
+    /// have.
     fn find_injections(
         &self,
         language: usize,
         found: &Found,
         text: &Rope,
         injections: &mut Vec<Injection>,
-    ) {
+    ) -> Option<HashSet<LayerKey>> {
         let EntryState::Loaded {
             injections: Some(query),
             ..
         } = &self.list[language].state
         else {
             injections.clear();
-            return;
+            return None;
         };
         let Some(content) = query.capture_index_for_name("injection.content") else {
             injections.clear();
-            return;
+            return None;
         };
         let named = query.capture_index_for_name("injection.language");
         let everywhere = 0..usize::MAX;
@@ -544,24 +642,29 @@ impl Languages {
                 }
             }
         }
-        match found.regions {
-            None => *injections = new,
-            Some(regions) => {
-                // A match can reach into two regions.
-                new.sort_by_key(|i| i.ranges[0].start_byte);
-                new.dedup_by(|a, b| a.language == b.language && same_bytes(&a.ranges, &b.ranges));
-                injections.retain(|old| {
-                    let (start, end) = old.span();
-                    !regions.iter().any(|r| r.start <= end && start <= r.end)
-                        && !new.iter().any(|n| {
-                            let (s, e) = n.span();
-                            s < end && start < e
-                        })
+        let Some(regions) = found.regions else {
+            *injections = new;
+            return None;
+        };
+        // A match can reach into two regions.
+        new.sort_by_key(|i| i.ranges[0].start_byte);
+        new.dedup_by(|a, b| a.language == b.language && same_bytes(&a.ranges, &b.ranges));
+        let mut changed: HashSet<LayerKey> = new.iter().map(Injection::key).collect();
+        injections.retain(|old| {
+            let (start, end) = old.span();
+            let stays = !regions.iter().any(|r| r.start <= end && start <= r.end)
+                && !new.iter().any(|n| {
+                    let (s, e) = n.span();
+                    s < end && start < e
                 });
-                injections.append(&mut new);
-                injections.sort_by_key(|i| i.ranges[0].start_byte);
+            if !stays {
+                changed.insert(old.key());
             }
-        }
+            stays
+        });
+        injections.append(&mut new);
+        injections.sort_by_key(|i| i.ranges[0].start_byte);
+        Some(changed)
     }
 
     /// The highlight style of each byte in `range`, or `None` for plain text.
@@ -592,19 +695,14 @@ impl Languages {
         for layer in layers {
             // Injected layers lie inside their host's ranges, so ones out of
             // sight hide their own injections too.
-            if clip(&layer.ranges, range).is_empty() {
+            let Some(tree) = &layer.tree else {
+                continue;
+            };
+            if !overlaps(&layer.ranges, range) {
                 continue;
             }
             let ranges = &layer.ranges;
-            self.paint_layer(
-                theme,
-                layer.language,
-                &layer.tree,
-                ranges,
-                text,
-                range,
-                styles,
-            );
+            self.paint_layer(theme, layer.language, tree, ranges, text, range, styles);
             self.paint_layers(theme, &layer.injections.layers, text, range, styles);
         }
     }
@@ -803,6 +901,11 @@ fn paint(
     }
 }
 
+fn overlaps(ranges: &[TsRange], range: &Range<usize>) -> bool {
+    let first = ranges.partition_point(|r| r.end_byte <= range.start);
+    ranges.get(first).is_some_and(|r| r.start_byte < range.end)
+}
+
 /// The byte ranges of `ranges` within `range`.
 fn clip(ranges: &[TsRange], range: &Range<usize>) -> Vec<Range<usize>> {
     let first = ranges.partition_point(|r| r.end_byte <= range.start);
@@ -968,6 +1071,10 @@ impl BufferSyntax {
         self.dirty = true;
     }
 
+    pub fn injections_pending(&self) -> bool {
+        self.injections_pending
+    }
+
     /// Drops the trees when an edit cannot be described, e.g. after undo.
     pub fn invalidate(&mut self) {
         self.tree = None;
@@ -986,7 +1093,9 @@ fn edit_injections(injections: &mut Injections, edit: &InputEdit) {
             .for_each(|r| shift_range(r, edit));
     }
     for layer in &mut injections.layers {
-        layer.tree.edit(edit);
+        if let Some(tree) = &mut layer.tree {
+            tree.edit(edit);
+        }
         // Touching counts: typing at the end of a range may extend it.
         layer.touched |= layer
             .ranges

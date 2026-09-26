@@ -130,30 +130,67 @@ impl State {
         }
     }
 
-    /// Parses the shown buffers if they changed since the last parse.
-    /// Hidden buffers wait until they are shown. Injections a first parse
-    /// left for later wait for the next call. Returns whether the colors
-    /// may have changed.
+    /// Parses the shown buffers if they changed since the last parse, and
+    /// the languages injected into them on the screen. Hidden buffers wait
+    /// until they are shown. Returns whether the colors may have changed.
     pub fn update_syntax(&mut self) -> bool {
+        let mut changed = false;
+        for index in self.shown_buffers() {
+            let parsed = self.parse(index);
+            changed |= parsed;
+            let screen = self.screen_of(index, 0);
+            let buffer = &mut self.buffers[index];
+            let text = buffer.text().clone();
+            let Some(syntax) = &mut buffer.syntax else {
+                continue;
+            };
+            // A file just opened shows the colors of its own language
+            // first; its injections wait for the next call.
+            if parsed && syntax.injections_pending() {
+                continue;
+            }
+            changed |= self.languages.update_injections(syntax, &text, &screen);
+        }
+        changed
+    }
+
+    /// Parses the injected languages a screen above and below the shown
+    /// ones, so scrolling finds them parsed, and forgets those far away,
+    /// which would cost time on every edit.
+    pub fn prefetch_injections(&mut self) {
+        for index in self.shown_buffers() {
+            let (near, keep) = (self.screen_of(index, 1), self.screen_of(index, 4));
+            let buffer = &mut self.buffers[index];
+            let text = buffer.text().clone();
+            if let Some(syntax) = &mut buffer.syntax {
+                self.languages
+                    .prefetch_injections(syntax, &text, &near, &keep);
+            }
+        }
+    }
+
+    fn shown_buffers(&self) -> Vec<usize> {
         let mut shown: Vec<usize> = self.others.iter().map(|(_, v)| v.buffer).collect();
         shown.push(self.view.buffer);
         shown.sort_unstable();
         shown.dedup();
-        let mut parsed = false;
-        for &index in &shown {
-            parsed |= self.parse(index);
-        }
-        if parsed {
-            return true;
-        }
-        for index in shown {
-            let buffer = &mut self.buffers[index];
-            let text = buffer.text().clone();
-            if let Some(syntax) = &mut buffer.syntax {
-                parsed |= self.languages.inject_pending(syntax, &text);
-            }
-        }
-        parsed
+        shown
+    }
+
+    /// The text of buffer `index` in its views, and `margin` screens above
+    /// and below each.
+    fn screen_of(&self, index: usize, margin: usize) -> Vec<std::ops::Range<usize>> {
+        let text = self.buffers[index].text();
+        let rows = self.height as usize;
+        std::iter::once(&self.view)
+            .chain(self.others.iter().map(|(_, v)| v))
+            .filter(|v| v.buffer == index)
+            .map(|v| {
+                let line = |n: usize| text.line_to_byte(n.min(text.len_lines()));
+                line(v.top_line.saturating_sub(margin * rows))
+                    ..line(v.top_line + (margin + 1) * rows)
+            })
+            .collect()
     }
 
     /// Parses buffer `index` if it changed since the last parse, loading its
@@ -686,9 +723,13 @@ impl Editor {
     /// whether the screen needs drawing again.
     pub fn catch_up(&mut self) -> bool {
         let delivered = self.deliver_events();
-        let parsed = self.state_mut().update_syntax();
         if delivered {
             self.scroll_to_cursor();
+        }
+        let parsed = self.state_mut().update_syntax();
+        if !delivered && !parsed {
+            // Off the screen, so nothing to draw again.
+            self.state_mut().prefetch_injections();
         }
         delivered || parsed
     }
@@ -795,8 +836,9 @@ impl Editor {
     /// the scroll position up to date with what they did.
     pub(crate) fn after_plugins_ran(&mut self) {
         self.deliver_events();
-        self.state_mut().update_syntax();
+        // Scrolled first: injected languages are parsed near the screen.
         self.scroll_to_cursor();
+        self.state_mut().update_syntax();
     }
 
     /// Scrolls the view so the cursor stays `scroll_margin` lines away from

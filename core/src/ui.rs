@@ -174,6 +174,14 @@ fn builtin(name: &str) -> Option<Style> {
             ..Style::default()
         }),
         "text.literal" => Some(fg(2)),
+        "text.emphasis" => Some(Style {
+            italic: true,
+            ..Style::default()
+        }),
+        "text.strong" => Some(Style {
+            bold: true,
+            ..Style::default()
+        }),
         "text.reference" => Some(fg(6)),
         "text.uri" => Some(Style {
             fg: Color::Indexed(6),

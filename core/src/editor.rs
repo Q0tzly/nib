@@ -8,6 +8,7 @@ use tree_sitter::Tree;
 use crate::Error;
 use crate::background::{Inbox, Message, Waker};
 use crate::buffer::Buffer;
+use crate::clipboard::{self, Clipboard};
 use crate::config::{Config, Indent, PluginConfig, Settings};
 use crate::events::{Command, Event, Timer};
 use crate::files::FileJobs;
@@ -55,6 +56,7 @@ pub(crate) struct State {
     pub processes: Processes,
     /// File lists being made for plugins.
     pub files: FileJobs,
+    pub clipboard: Box<dyn Clipboard>,
     /// Views of buffers not shown, so switching back restores the selection
     /// and scroll position.
     pub hidden_views: HashMap<usize, View>,
@@ -459,6 +461,7 @@ impl Default for Editor {
                 last_timer_id: 0,
                 processes: Processes::new(inbox.clone()),
                 files: FileJobs::new(inbox.clone()),
+                clipboard: Box::new(clipboard::Internal::default()),
                 inbox,
                 hidden_views: HashMap::new(),
                 languages: Languages::default(),
@@ -565,6 +568,12 @@ impl Editor {
             self.send_to_plugins(key);
         }
         self.after_plugins_ran();
+    }
+
+    /// Gives plugins the system clipboard. Without it, they get one inside
+    /// the editor.
+    pub fn set_clipboard(&mut self, clipboard: Box<dyn Clipboard>) {
+        self.state_mut().clipboard = clipboard;
     }
 
     /// Sets what background threads call after queueing work, such as a

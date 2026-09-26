@@ -3,6 +3,7 @@
 mod background;
 pub mod buffer;
 pub mod change;
+mod clipboard;
 pub mod config;
 pub mod editor;
 mod error;
@@ -25,6 +26,7 @@ pub mod view;
 pub use background::Waker;
 pub use buffer::{Buffer, Change, LineEnding};
 pub use change::{Assoc, ChangeSet, Edit};
+pub use clipboard::Clipboard;
 pub use config::{Config, Indent, Load, PluginConfig, Settings, Timeout};
 pub use editor::{Editor, Menu, ScrollAmount};
 pub use error::Error;

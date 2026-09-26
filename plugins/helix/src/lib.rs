@@ -22,7 +22,7 @@ use nib_plugin::nib::plugin::types::{
     CursorShape, Edit, KeyCode, KeyEvent, Modifiers, SelRange, Selection, Span, UndoMode,
 };
 use nib_plugin::nib::plugin::ui::{Decoration, Panel, Popup, PopupAnchor, Side};
-use nib_plugin::nib::plugin::{commands, editor, input, settings, ui};
+use nib_plugin::nib::plugin::{clipboard, commands, editor, input, settings, ui};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -589,6 +589,18 @@ impl Helix {
                 self.register_fresh = true;
             }
             Pending::Space => {
+                // The system clipboard, as the `+` register.
+                if matches!(c, 'y' | 'p' | 'P') {
+                    self.register = Some('+');
+                    match c {
+                        'y' => {
+                            self.yank(view);
+                        }
+                        'p' => self.paste(view, false),
+                        _ => self.paste(view, true),
+                    }
+                    return;
+                }
                 let command = match c {
                     'f' => "picker.files",
                     'k' => "lsp.hover",
@@ -875,9 +887,17 @@ impl Helix {
             .map(|r| doc.slice(r.anchor.min(r.head), r.anchor.max(r.head)))
             .collect();
         let count = values.len();
-        let register = self.take_register();
-        if register != '_' {
-            self.registers.insert(register, values);
+        match self.take_register() {
+            '_' => {}
+            // One text for the system clipboard, a line per selection.
+            '+' => {
+                if let Err(err) = clipboard::set(&values.join("\n")) {
+                    ui::show_message(&format!("clipboard: {err}"));
+                }
+            }
+            register => {
+                self.registers.insert(register, values);
+            }
         }
         count
     }
@@ -887,10 +907,21 @@ impl Helix {
     /// selected.
     fn paste(&mut self, view: &View, before: bool) {
         let register = self.take_register();
-        let Some(values) = self.registers.get(&register).filter(|v| !v.is_empty()) else {
+        let values = if register == '+' {
+            match clipboard::get() {
+                Ok(text) => vec![text],
+                Err(err) => {
+                    ui::show_message(&format!("clipboard: {err}"));
+                    return;
+                }
+            }
+        } else {
+            self.registers.get(&register).cloned().unwrap_or_default()
+        };
+        if values.iter().all(String::is_empty) {
             ui::show_message(&format!("register {register} is empty"));
             return;
-        };
+        }
         let doc = Doc::new(view.buffer());
         let last = values.len() - 1;
         let changes = view

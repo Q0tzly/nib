@@ -327,6 +327,7 @@ set-decorations: func(buf: borrow<buffer>, namespace: string, decorations: list<
 | `fs-read` / `fs-write` | 作業ディレクトリ以下の読み取り / 書き込み（WASI の preopen で渡す）。`fs-read` は `files.walk` も使える |
 | `process` | `process.spawn` による外部プロセスの起動 |
 | `network` | `wasi:sockets` / `wasi:http` |
+| `clipboard` | `clipboard.get` / `clipboard.set` によるシステムのクリップボードの読み書き |
 
 - 宣言した権限は、確認なしですべて与える。
 - 宣言していない権限は与えない。宣言を強制することで、一覧の内容が常に実態と一致する。
@@ -378,6 +379,19 @@ interface files {
 - イベントは、一覧を頼んだプラグインにだけ届く。
 - 使うには `fs-read` の権限が要る。ファイル名から、利用者のディレクトリの中身がわかるため。
 - WASI のファイル API で数えると、呼び出しのあいだメインスレッドが止まる。この API なら、数えているあいだもエディタは動き続ける（「待たせない」）。
+
+## クリップボード
+
+```wit
+interface clipboard {
+    get: func() -> result<string, string>;
+    set: func(text: string) -> result<_, string>;
+}
+```
+
+- 同期で読み書きする。貼り付けのように、その場で中身が要る操作のため。OS のクリップボードの読み書きは速いので、呼び出しの時間の上限に収まる。
+- 使うには `clipboard` の権限が要る。クリップボードにはパスワードのような秘密が入ることがあるため、読み書きの両方を権限の対象にする。
+- 読み書きの中身はフロントエンドが決める（[architecture.md](architecture.md) の「クレート構成」）。
 
 ## 外部プロセス
 

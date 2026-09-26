@@ -1,3 +1,4 @@
+mod clipboard;
 mod commands;
 mod draw;
 mod settings;
@@ -43,6 +44,11 @@ fn main() -> ExitCode {
     }
 
     let mut editor = Editor::default();
+    // Without one, as over SSH with no display, plugins get a clipboard
+    // inside the editor.
+    if let Some(system) = clipboard::System::new() {
+        editor.set_clipboard(Box::new(system));
+    }
     // Broken settings should not keep the editor from starting: fall back to
     // the defaults and say why.
     let dir = settings::config_dir();

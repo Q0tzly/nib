@@ -54,7 +54,13 @@ pub fn lines(pending: Pending) -> Option<Vec<Vec<Span>>> {
         }
         Pending::Space => (
             "Space",
-            vec![("f", "open a file"), ("k", "show what it is")],
+            vec![
+                ("f", "open a file"),
+                ("k", "show what it is"),
+                ("y", "yank to the clipboard"),
+                ("p", "paste the clipboard after"),
+                ("P", "paste the clipboard before"),
+            ],
         ),
         Pending::Find(_) | Pending::Replace | Pending::Register => return None,
     };

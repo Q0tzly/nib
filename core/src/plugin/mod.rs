@@ -275,6 +275,7 @@ pub(crate) struct PluginData {
     can_spawn: bool,
     /// It may list files: "fs-read" or "fs-write".
     can_read_files: bool,
+    can_use_clipboard: bool,
     clock: CallClock,
     interrupts: Arc<AtomicU64>,
     wasi: WasiCtx,
@@ -882,6 +883,7 @@ fn start_in(plugins: &mut Plugins, state: &mut Option<State>, id: PluginId) -> R
             .capabilities
             .iter()
             .any(|c| c == "fs-read" || c == "fs-write"),
+        can_use_clipboard: plugin.capabilities.iter().any(|c| c == "clipboard"),
         clock: CallClock {
             started: Instant::now(),
             limit: limits.init,

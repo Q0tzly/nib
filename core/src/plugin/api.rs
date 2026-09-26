@@ -39,8 +39,8 @@ pub(crate) mod bindings {
 }
 
 use bindings::nib::plugin::{
-    commands, editor, events, files, input, process, settings, syntax, timers, types as wit,
-    ui as wit_ui,
+    clipboard, commands, editor, events, files, input, process, settings, syntax, timers,
+    types as wit, ui as wit_ui,
 };
 
 /// A buffer as seen by a plugin. The resource's rep is the buffer index.
@@ -580,6 +580,24 @@ impl process::Host for PluginData {
         Ok(spawned.map(Resource::new_own))
     }
 }
+
+impl clipboard::Host for PluginData {
+    fn get(&mut self) -> HostResult<Result<String, String>> {
+        if !self.can_use_clipboard {
+            return Ok(Err(NO_CLIPBOARD.into()));
+        }
+        Ok(self.state()?.clipboard.get())
+    }
+
+    fn set(&mut self, text: String) -> HostResult<Result<(), String>> {
+        if !self.can_use_clipboard {
+            return Ok(Err(NO_CLIPBOARD.into()));
+        }
+        Ok(self.state()?.clipboard.set(&text))
+    }
+}
+
+const NO_CLIPBOARD: &str = "the clipboard needs the \"clipboard\" capability";
 
 impl files::Host for PluginData {
     fn walk(&mut self, dir: Option<String>) -> HostResult<Result<u64, String>> {

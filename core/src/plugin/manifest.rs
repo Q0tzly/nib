@@ -24,7 +24,8 @@ pub(crate) struct Manifest {
     pub capabilities: Vec<String>,
 }
 
-pub(crate) const CAPABILITIES: [&str; 4] = ["process", "fs-read", "fs-write", "network"];
+pub(crate) const CAPABILITIES: [&str; 5] =
+    ["process", "fs-read", "fs-write", "network", "clipboard"];
 
 /// A language the plugin provides: a tree-sitter grammar as WebAssembly and
 /// its queries, as files in the plugin.

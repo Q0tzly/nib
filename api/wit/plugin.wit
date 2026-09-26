@@ -176,6 +176,12 @@ interface process {
     spawn: func(command: string, args: list<string>, cwd: option<string>) -> result<child, string>;
 }
 
+/// The system clipboard, for plugins with the "clipboard" capability.
+interface clipboard {
+    get: func() -> result<string, string>;
+    set: func(text: string) -> result<_, string>;
+}
+
 /// File lists, for plugins with the "fs-read" capability. The files are
 /// counted on a background thread, so plugins never wait for them.
 interface files {
@@ -407,6 +413,7 @@ world plugin {
     import timers;
     import process;
     import files;
+    import clipboard;
 
     export guest;
 }

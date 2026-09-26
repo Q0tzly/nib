@@ -81,6 +81,8 @@ fn listing_files_needs_the_capability() {
     let mut editor = editor_with(&["test-events", "test-misbehave"]);
     let err = editor.call_command("test-misbehave.walk", "").unwrap_err();
     assert_eq!(err, "listing files needs the \"fs-read\" capability");
+    let err = editor.call_command("test-misbehave.paste", "").unwrap_err();
+    assert_eq!(err, "the clipboard needs the \"clipboard\" capability");
     let err = editor
         .call_command("test-events.walk", "nib-no-such-dir")
         .unwrap_err();

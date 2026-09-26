@@ -538,3 +538,35 @@ fn registers_keep_what_they_are_given() {
     type_keys(&mut editor, "\"ajp");
     assert_eq!(editor.message(), Some("register \" is empty"));
 }
+
+/// A clipboard the test can look into, as a frontend would give one.
+#[derive(Clone, Default)]
+struct SharedClipboard(std::sync::Arc<std::sync::Mutex<String>>);
+
+impl nib_core::Clipboard for SharedClipboard {
+    fn get(&mut self) -> Result<String, String> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+
+    fn set(&mut self, text: &str) -> Result<(), String> {
+        *self.0.lock().unwrap() = text.to_string();
+        Ok(())
+    }
+}
+
+#[test]
+fn the_clipboard_is_the_plus_register() {
+    let mut editor = editor_with_text("one\ntwo\n");
+    let clipboard = SharedClipboard::default();
+    editor.set_clipboard(Box::new(clipboard.clone()));
+    type_keys(&mut editor, "x y");
+    assert_eq!(*clipboard.0.lock().unwrap(), "one\n");
+    type_keys(&mut editor, "j p");
+    assert_eq!(text(&editor), "one\ntwo\none\n");
+    // Copied elsewhere, then pasted with "+P; other registers are apart.
+    *clipboard.0.lock().unwrap() = "zero\n".into();
+    type_keys(&mut editor, "gg\"+P");
+    assert_eq!(text(&editor), "zero\none\ntwo\none\n");
+    type_keys(&mut editor, "p");
+    assert_eq!(editor.message(), Some("register \" is empty"));
+}

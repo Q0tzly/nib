@@ -12,5 +12,7 @@ name = "nib"
 path = "src/main.rs"
 
 [dependencies]
+# The OS clipboard, which nib-core leaves to the frontend.
+arboard = "3"
 crossterm = "0.29"
 nib-core = { path = "../core" }

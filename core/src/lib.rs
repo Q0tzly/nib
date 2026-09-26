@@ -14,6 +14,7 @@ pub mod grid;
 mod history;
 pub mod input;
 mod layout;
+pub mod marks;
 mod plugin;
 mod process;
 mod render;
@@ -34,7 +35,7 @@ pub use error::Error;
 pub use events::TextChange;
 pub use grid::{Cell, Color, Cursor, CursorShape, Grid, Style, Symbol};
 pub use history::UndoMode;
-pub use input::{KeyCode, KeyEvent, Modifiers};
+pub use input::{KeyCode, KeyEvent, Modifiers, parse_keys};
 pub use plugin::{
     API_VERSION, Interrupter, PluginInfo, PluginManifest, PluginOptions, PluginSource, plugin_name,
     read_manifest,

@@ -140,9 +140,58 @@ impl std::str::FromStr for KeyEvent {
     }
 }
 
+/// Parses a sequence of keys: chars as they are, and a key in the notation
+/// above between `<` and `>`, as in `ihello<esc>` or `<C-w>v`. `<lt>` is a
+/// `<`. A line break and a tab in the text are Enter and Tab.
+pub fn parse_keys(keys: &str) -> Result<Vec<KeyEvent>, String> {
+    let mut parsed = Vec::new();
+    let mut rest = keys;
+    while let Some(c) = rest.chars().next() {
+        if c == '<' {
+            let end = rest
+                .find('>')
+                .ok_or_else(|| format!("unclosed `<` in {keys:?}; write `<lt>` for a `<`"))?;
+            let name = &rest[1..end];
+            parsed.push(match name {
+                "lt" => KeyEvent::new(KeyCode::Char('<')),
+                "gt" => KeyEvent::new(KeyCode::Char('>')),
+                _ => name.parse()?,
+            });
+            rest = &rest[end + 1..];
+            continue;
+        }
+        parsed.push(KeyEvent::new(match c {
+            '\n' => KeyCode::Enter,
+            '\t' => KeyCode::Tab,
+            c => KeyCode::Char(c),
+        }));
+        rest = &rest[c.len_utf8()..];
+    }
+    Ok(parsed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_key_sequences() {
+        let keys = parse_keys("ia<esc><C-w>v<lt>\n").unwrap();
+        assert_eq!(
+            keys,
+            [
+                KeyEvent::new(KeyCode::Char('i')),
+                KeyEvent::new(KeyCode::Char('a')),
+                KeyEvent::new(KeyCode::Escape),
+                KeyEvent::ctrl('w'),
+                KeyEvent::new(KeyCode::Char('v')),
+                KeyEvent::new(KeyCode::Char('<')),
+                KeyEvent::new(KeyCode::Enter),
+            ]
+        );
+        assert!(parse_keys("a<esc").is_err());
+        assert!(parse_keys("<nope>").is_err());
+    }
 
     fn parse(s: &str) -> KeyEvent {
         s.parse().unwrap()

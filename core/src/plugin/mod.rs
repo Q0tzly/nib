@@ -33,6 +33,36 @@ pub fn plugin_name(dir: &Path) -> Result<String, Error> {
     Ok(manifest::read(&dir.join("plugin.toml"))?.name)
 }
 
+/// What a plugin's manifest says, for handling plugins without loading
+/// them, as `nib plugin add` does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginManifest {
+    pub name: String,
+    pub version: String,
+    /// The `nib:plugin` version it was built for; see `API_VERSION`.
+    pub api: String,
+    pub capabilities: Vec<String>,
+    pub events: Vec<String>,
+    /// The languages it provides.
+    pub languages: Vec<String>,
+    /// It has code to run, not only data such as languages.
+    pub has_code: bool,
+}
+
+/// Reads and checks the manifest of the plugin in `dir`.
+pub fn read_manifest(dir: &Path) -> Result<PluginManifest, Error> {
+    let manifest = manifest::read(&dir.join("plugin.toml"))?;
+    Ok(PluginManifest {
+        name: manifest.name,
+        version: manifest.version,
+        api: manifest.api,
+        capabilities: manifest.capabilities,
+        events: manifest.events,
+        languages: manifest.languages.into_iter().map(|l| l.name).collect(),
+        has_code: dir.join("plugin.wasm").is_file(),
+    })
+}
+
 /// The version of `nib:plugin` this host implements.
 pub const API_VERSION: &str = "0.4";
 

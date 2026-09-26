@@ -1,6 +1,7 @@
 mod clipboard;
 mod commands;
 mod draw;
+mod install;
 mod settings;
 mod terminal;
 
@@ -57,7 +58,15 @@ fn main() -> ExitCode {
         Some(Err(err)) => (Config::default(), Some(err)),
         None => (Config::default(), None),
     };
-    let entries = settings::entries(&config, dir.as_deref());
+    // A broken record of installed plugins leaves them out, not nib.
+    let store = settings::store();
+    let (entries, store_error) = match settings::entries(&config, dir.as_deref(), store.as_ref()) {
+        Ok(entries) => (entries, None),
+        Err(err) => {
+            let entries = settings::entries(&config, dir.as_deref(), None);
+            (entries.expect("nothing to read without a store"), Some(err))
+        }
+    };
     editor.apply_config(config);
     for path in &files {
         if let Err(err) = editor.open(path) {
@@ -66,12 +75,19 @@ fn main() -> ExitCode {
         }
     }
     editor.set_plugin_cache_dir(settings::cache_dir());
-    if let Err(err) = load_plugins(&mut editor, entries, &plugins) {
-        eprintln!("nib: {err}");
-        return ExitCode::FAILURE;
-    }
+    let failures = match load_plugins(&mut editor, entries, &plugins) {
+        Ok(failures) => failures,
+        Err(err) => {
+            eprintln!("nib: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
     if let Some(err) = config_error {
         editor.show_message(format!("{err}; using the defaults"));
+    } else if let Some(err) = store_error {
+        editor.show_message(format!("{err}; installed plugins left out"));
+    } else if !failures.is_empty() {
+        editor.show_message(failures.join("; "));
     }
     // The keymap takes every key, so nothing else tells people the menu key.
     if editor.message().is_none() {
@@ -86,28 +102,38 @@ fn main() -> ExitCode {
 }
 
 /// Loads the enabled plugins in order, then the `--plugin` ones, which
-/// replace a plugin of the same name, e.g. while working on it.
-fn load_plugins(editor: &mut Editor, entries: Vec<Entry>, extra: &[PathBuf]) -> Result<(), String> {
+/// replace a plugin of the same name, e.g. while working on it. A plugin
+/// that fails to load is left out and returned as a message, so it cannot
+/// keep nib from starting, such as an installed one made for another nib.
+/// A `--plugin` one that fails is an error: it was asked for by hand.
+fn load_plugins(
+    editor: &mut Editor,
+    entries: Vec<Entry>,
+    extra: &[PathBuf],
+) -> Result<Vec<String>, String> {
     let replaced = extra
         .iter()
         .map(|dir| plugin_name(dir))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| err.to_string())?;
+    let mut failures = Vec::new();
     for entry in entries {
         if !entry.enabled || replaced.contains(&entry.name) {
             continue;
         }
-        match entry.source {
+        let loaded = match entry.source {
             Source::Builtin(i) => {
                 let (_, manifest, files) = builtin::PLUGINS[i];
-                editor.load_builtin_plugin(manifest, files)
+                editor
+                    .load_builtin_plugin(manifest, files)
+                    .map_err(|err| err.to_string())
             }
-            Source::Dir(dir) => {
-                settings::check_name(&entry.name, &dir)?;
-                editor.load_plugin(&dir)
-            }
+            Source::Dir(dir) => settings::check_name(&entry.name, &dir)
+                .and_then(|()| editor.load_plugin(&dir).map_err(|err| err.to_string())),
+        };
+        if let Err(err) = loaded {
+            failures.push(err);
         }
-        .map_err(|err| err.to_string())?;
     }
     for dir in extra {
         editor.load_plugin(dir).map_err(|err| err.to_string())?;
@@ -115,5 +141,5 @@ fn load_plugins(editor: &mut Editor, entries: Vec<Entry>, extra: &[PathBuf]) -> 
     if builtin::PLUGINS.is_empty() {
         editor.show_message("built without the standard plugins; run `cargo xtask build-plugins`");
     }
-    Ok(())
+    Ok(failures)
 }

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use nib_core::{Config, plugin_name};
 
 use crate::builtin;
+use crate::install::Store;
 
 /// `~/.config/nib`, or under `$XDG_CONFIG_HOME` or `%APPDATA%`.
 pub fn config_dir() -> Option<PathBuf> {
@@ -16,6 +17,23 @@ pub fn config_dir() -> Option<PathBuf> {
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
         .or_else(|| env::var_os("APPDATA").map(PathBuf::from))?;
     Some(base.join("nib"))
+}
+
+/// `~/.local/share/nib`, or under `$XDG_DATA_HOME` or `%LOCALAPPDATA%`:
+/// installed plugins and what plugins keep.
+pub fn data_dir() -> Option<PathBuf> {
+    let base = env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("share"))
+        })
+        .or_else(|| env::var_os("LOCALAPPDATA").map(PathBuf::from))?;
+    Some(base.join("nib"))
+}
+
+/// Where installed plugins are kept.
+pub fn store() -> Option<Store> {
+    data_dir().map(|data| Store { data })
 }
 
 /// Where compiled plugins are cached, so later starts skip compiling.
@@ -74,12 +92,18 @@ pub struct Entry {
     pub source: Source,
     /// Its `plugins/<name>.toml`, if it has one.
     pub file: Option<PathBuf>,
+    /// Where it was installed from, for installed ones.
+    pub origin: Option<String>,
 }
 
 /// Every plugin, in load order: built-in ones first, so the keymap is at
-/// the bottom of the input stack, then the ones with a `path`. A `path`
-/// replaces the built-in plugin of the same name.
-pub fn entries(config: &Config, dir: Option<&Path>) -> Vec<Entry> {
+/// the bottom of the input stack, then installed ones, then the ones with a
+/// `path`. A `path` replaces the plugin of the same name.
+pub fn entries(
+    config: &Config,
+    dir: Option<&Path>,
+    store: Option<&Store>,
+) -> Result<Vec<Entry>, String> {
     let file = |name: &str| {
         let path = dir?.join("plugins").join(format!("{name}.toml"));
         config.plugins.contains_key(name).then_some(path)
@@ -93,7 +117,22 @@ pub fn entries(config: &Config, dir: Option<&Path>) -> Vec<Entry> {
                 enabled: settings.enabled,
                 source: Source::Builtin(i),
                 file: file(name),
+                origin: None,
             });
+        }
+    }
+    if let Some(store) = store {
+        for record in store.records()? {
+            let settings = config.plugin(&record.name);
+            if settings.path.is_none() {
+                entries.push(Entry {
+                    enabled: settings.enabled,
+                    source: Source::Dir(store.dir(&record.name)),
+                    file: file(&record.name),
+                    origin: Some(record.source),
+                    name: record.name,
+                });
+            }
         }
     }
     for (name, settings) in &config.plugins {
@@ -103,10 +142,11 @@ pub fn entries(config: &Config, dir: Option<&Path>) -> Vec<Entry> {
                 enabled: settings.enabled,
                 source: Source::Dir(expand_home(path)),
                 file: file(name),
+                origin: None,
             });
         }
     }
-    entries
+    Ok(entries)
 }
 
 /// Checks that the plugin in `dir` is the one its settings file is named

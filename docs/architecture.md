@@ -317,7 +317,7 @@ servers.rust.command = ["rust-analyzer"]
   - キーは起動のきっかけにならない。キーマップのように入力スタックに層を積むプラグインは、`init` で積むので、lazy にしない。
   - 起動するまで、そのプラグインのコマンドは `commands.all()` に出ない。
 
-インストールしたプラグイン（[plugin-install.md](plugin-install.md)）は `~/.local/share/nib/installed/` に置き、標準プラグインのあとに読み込む。`plugins/<name>.toml` は設定だけを書く場所のままにする。
+インストールしたプラグイン（[plugin-install.md](plugin-install.md)）は `~/.local/share/nib/installed/` に置き、標準プラグインのあとに読み込む。`plugins/<name>.toml` は設定だけを書く場所のままにする。読み込めないプラグインは飛ばして起動し、理由をメッセージで出す。
 
 #### サブコマンド
 

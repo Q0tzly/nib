@@ -3,17 +3,23 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use nib_core::Config;
 
+use crate::builtin;
+use crate::install::{self, Outcome, Store};
 use crate::settings::{self, Source};
 
 pub const USAGE: &str = "usage: nib [--plugin DIR]... [FILE]...
-       nib config path     show where the settings are
-       nib config init     write commented settings files to start from
-       nib plugin list     list the plugins and their settings files";
+       nib config path                 show where the settings are
+       nib config init                 write commented settings files to start from
+       nib plugin list                 list the plugins and their settings files
+       nib plugin add SOURCE [--yes]   install from owner/repo[@tag], a URL, or a file
+       nib plugin update [NAME]...     update installed plugins [--yes]
+       nib plugin remove NAME          uninstall a plugin
+       nib plugin pack DIR             make NAME-VERSION.nib.tar.gz from a built plugin";
 
 pub fn config(args: &[OsString]) -> ExitCode {
     let Some(dir) = settings::config_dir() else {
@@ -32,11 +38,96 @@ pub fn config(args: &[OsString]) -> ExitCode {
 }
 
 pub fn plugin(args: &[OsString]) -> ExitCode {
-    let result = match args.first().and_then(|a| a.to_str()) {
-        Some("list") => list(),
+    let args: Vec<&str> = args.iter().filter_map(|a| a.to_str()).collect();
+    let yes = args.contains(&"--yes");
+    let words: Vec<&str> = args.iter().copied().filter(|a| *a != "--yes").collect();
+    let result = match words[..] {
+        ["list"] => list(),
+        ["add", source] => with_store(|store| add(store, source, yes)),
+        ["update", ref names @ ..] => with_store(|store| update(store, names, yes)),
+        ["remove", name] => with_store(|store| remove(store, name)),
+        ["pack", dir] => install::pack(Path::new(dir), Path::new("."))
+            .map(|file| println!("wrote {}", file.display())),
         _ => Err(USAGE.to_string()),
     };
     finish(result)
+}
+
+fn with_store(f: impl FnOnce(&Store) -> Result<(), String>) -> Result<(), String> {
+    let store = settings::store().ok_or("no home directory to install plugins in")?;
+    f(&store)
+}
+
+/// What asks the user: nothing with `--yes`, the terminal otherwise.
+fn confirmer(yes: bool) -> impl FnMut(&str) -> bool {
+    move |question: &str| {
+        if yes {
+            println!("{question} yes (--yes)");
+            true
+        } else {
+            install::ask(question)
+        }
+    }
+}
+
+fn add(store: &Store, source: &str, yes: bool) -> Result<(), String> {
+    let builtin: Vec<&str> = builtin::PLUGINS.iter().map(|(name, _, _)| *name).collect();
+    match install::add(store, source, &builtin, &mut confirmer(yes))? {
+        Some(name) => println!(
+            "installed {name} in {}; it loads the next time nib starts",
+            store.dir(&name).display()
+        ),
+        None => println!("nothing installed"),
+    }
+    Ok(())
+}
+
+fn update(store: &Store, names: &[&str], yes: bool) -> Result<(), String> {
+    let names: Vec<String> = if names.is_empty() {
+        store.records()?.into_iter().map(|r| r.name).collect()
+    } else {
+        names.iter().map(|n| n.to_string()).collect()
+    };
+    if names.is_empty() {
+        println!("no plugins are installed");
+    }
+    let mut failed = false;
+    for name in names {
+        match install::update(store, &name, &mut confirmer(yes)) {
+            Ok(Outcome::Updated { from, to }) => println!("{name}: {from} -> {to}"),
+            Ok(Outcome::UpToDate) => println!("{name}: up to date"),
+            Ok(Outcome::Pinned) => {
+                println!("{name}: installed from a tag or an archive; left as is")
+            }
+            Ok(Outcome::Declined) => println!("{name}: not updated"),
+            Err(err) => {
+                eprintln!("nib: {name}: {err}");
+                failed = true;
+            }
+        }
+    }
+    if failed {
+        Err("some plugins were not updated".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn remove(store: &Store, name: &str) -> Result<(), String> {
+    install::remove(store, name)?;
+    println!("removed {name}");
+    let kept: Vec<PathBuf> = [
+        settings::config_dir().map(|d| d.join("plugins").join(format!("{name}.toml"))),
+        Some(store.data.join("plugins").join(name)),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|path| path.exists())
+    .collect();
+    for path in kept {
+        println!("kept {}", path.display());
+    }
+    Ok(())
 }
 
 fn finish(result: Result<(), String>) -> ExitCode {
@@ -100,13 +191,17 @@ fn list() -> Result<(), String> {
         None => Config::default(),
     };
     let mut problems = Vec::new();
-    let rows: Vec<[String; 4]> = settings::entries(&config, dir.as_deref())
+    let store = settings::store();
+    let rows: Vec<[String; 4]> = settings::entries(&config, dir.as_deref(), store.as_ref())?
         .into_iter()
         .map(|entry| {
             let (source, problem) = match &entry.source {
                 Source::Builtin(_) => ("built-in".to_string(), None),
                 Source::Dir(path) => (
-                    path.display().to_string(),
+                    entry
+                        .origin
+                        .clone()
+                        .unwrap_or_else(|| path.display().to_string()),
                     settings::check_name(&entry.name, path).err(),
                 ),
             };

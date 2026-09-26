@@ -4,7 +4,7 @@
 package editor
 
 import (
-	"github.com/q0tzly/nib/sdk/go/nib/plugin/types"
+	"github.com/nib-editor/nib/sdk/go/nib/plugin/types"
 	"go.bytecodealliance.org/cm"
 )
 

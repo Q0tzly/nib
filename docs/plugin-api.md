@@ -442,7 +442,7 @@ interface process {
 ## SDK
 
 - **Rust**（`sdk/rust`、クレート `nib-plugin`）: wit-bindgen の生成コードを包み、`Plugin` トレイトと `export!` マクロを提供する。`wasm32-wasip2` 向けにビルドするだけで、コンポーネントが出来上がる。
-- **Go**（`sdk/go`、モジュール `github.com/q0tzly/nib/sdk/go`）: M4.8 で作る。
+- **Go**（`sdk/go`、モジュール `github.com/nib-editor/nib/sdk/go`）: M4.8 で作る。
   - 本家の Go（1.27）は `wasip1` までで、コンポーネント（`wasip2`）を作れない。TinyGo（0.42 以降）の `-target=wasip2` で作る。TinyGo は wasm の最適化とゴルーチンの仕組みのために binaryen の `wasm-opt` を、コンポーネントに包むために `wasm-tools` を使うので、それらも要る。
   - 型と関数は、wit-bindgen-go（Bytecode Alliance）で WIT から生成し、生成したコードをリポジトリに置く。利用者は生成の道具を持たなくてよい。`api/wit/` を変えたら、`go generate` で作り直す。
   - 生成したままの形は書きにくい（戻り値が `cm.Result` など）ので、薄いパッケージ `nib` をかぶせる。`nib.Plugin` インターフェースを実装して `nib.Register` に渡すだけで、4 つの関数（`init`、`handle-key`、`run-command`、`on-event`）がつながる。使わない関数は `nib.Base` を埋め込めば省ける。
@@ -452,7 +452,7 @@ interface process {
 
 ```sh
 tinygo build -target=wasip2 \
-  --wit-package "$(go list -m -f '{{.Dir}}' github.com/q0tzly/nib/sdk/go)/wit" \
+  --wit-package "$(go list -m -f '{{.Dir}}' github.com/nib-editor/nib/sdk/go)/wit" \
   --wit-world plugin -o plugin.wasm .
 ```
 

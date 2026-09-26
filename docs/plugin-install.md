@@ -58,12 +58,12 @@ nib plugin add foo                              # 一覧で foo の取得元を�
 
 ## 名前で探す
 
-一覧は git リポジトリ [q0tzly/nib-plugins](https://github.com/q0tzly/nib-plugins) の `plugins.toml` に置く。mise の registry と同じ考え方で、サーバーは持たない。
+一覧は git リポジトリ [nib-editor/plugins](https://github.com/nib-editor/plugins) の `plugins.toml` に置く。mise の registry と同じ考え方で、サーバーは持たない。
 
 ```toml
 [[plugin]]
 name = "wordcount"
-source = "q0tzly/nib-plugin-example"   # add が受け取る形なら何でもよい
+source = "nib-editor/plugin-example"   # add が受け取る形なら何でもよい
 description = "Shows the buffer's word count in the status line (an example in Go)"
 ```
 
@@ -73,12 +73,12 @@ nib plugin search status     # 名前か説明に status を含むもの（大�
 nib plugin add wordcount
 ```
 
-- 一覧は、使うたびに `https://raw.githubusercontent.com/q0tzly/nib-plugins/main/plugins.toml` から `curl` で取る。手元には保存しない。小さいファイルなので、毎回取っても困らない。
+- 一覧は、使うたびに `https://raw.githubusercontent.com/nib-editor/plugins/main/plugins.toml` から `curl` で取る。手元には保存しない。小さいファイルなので、毎回取っても困らない。
 - `add` は、引数に `/`、`\`、`:`、`@` がなく、`.nib.tar.gz` で終わらなければ名前とみなす。一覧でその名前の `source` を引き、あとは取得元を直接渡したときと同じ手順で入れる。
   - 記録ファイルの取得元には、名前ではなく引いた `source` を書く。身元はあくまで取得元で、一覧は近道でしかない。`update` も一覧を見ずに、記録した取得元から取る。
   - 取ったプラグインのマニフェストの名前が一覧の名前と違えば、入れない。一覧が指す先を取り違えていても、別の名前のものが入らないようにするため。
 - 一覧への登録は PR で受ける。一覧のリポジトリの CI は、項目がそろっていること、名前が正しい形で重ならず名前順であることだけを確かめる。一覧に載っていても中身を保証するものではなく、守りはインストール時の権限の確認に任せる。
-- サンプルとして、Go で書いたプラグイン [q0tzly/nib-plugin-example](https://github.com/q0tzly/nib-plugin-example)（`wordcount`）を載せてある。タグを push するとリリースの `.nib.tar.gz` を作るワークフローも持つので、プラグインを公開するときのひな形になる。
+- サンプルとして、Go で書いたプラグイン [nib-editor/plugin-example](https://github.com/nib-editor/plugin-example)（`wordcount`）を載せてある。タグを push するとリリースの `.nib.tar.gz` を作るワークフローも持つので、プラグインを公開するときのひな形になる。
 
 ## 読み込み
 

@@ -4,7 +4,7 @@
 // [Register] in an init function, and build with TinyGo for wasip2:
 //
 //	tinygo build -target=wasip2 \
-//	  --wit-package "$(go list -m -f '{{.Dir}}' github.com/q0tzly/nib/sdk/go)/wit" \
+//	  --wit-package "$(go list -m -f '{{.Dir}}' github.com/nib-editor/nib/sdk/go)/wit" \
 //	  --wit-world plugin -o plugin.wasm .
 //
 // The editor's API is in the generated packages under nib/plugin/, one per
@@ -14,9 +14,9 @@ package nib
 import (
 	"errors"
 
-	"github.com/q0tzly/nib/sdk/go/nib/plugin/events"
-	"github.com/q0tzly/nib/sdk/go/nib/plugin/guest"
-	"github.com/q0tzly/nib/sdk/go/nib/plugin/types"
+	"github.com/nib-editor/nib/sdk/go/nib/plugin/events"
+	"github.com/nib-editor/nib/sdk/go/nib/plugin/guest"
+	"github.com/nib-editor/nib/sdk/go/nib/plugin/types"
 	"go.bytecodealliance.org/cm"
 )
 

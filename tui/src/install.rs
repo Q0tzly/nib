@@ -17,7 +17,7 @@ use serde_json::Value;
 pub const SUFFIX: &str = ".nib.tar.gz";
 /// The list of plugins to find by name: a TOML file in a git repository,
 /// taking additions by pull request.
-pub const INDEX: &str = "https://raw.githubusercontent.com/q0tzly/nib-plugins/main/plugins.toml";
+pub const INDEX: &str = "https://raw.githubusercontent.com/nib-editor/plugins/main/plugins.toml";
 /// The most an archive may unpack to.
 const MAX_SIZE: u64 = 100 << 20;
 

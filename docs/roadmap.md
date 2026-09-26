@@ -296,8 +296,8 @@ M1 のゴールは、Helix 風キーマップのプラグインだけで、nib �
 
 > 完了（2026-09-26）。Go で書いたサンプル（`wordcount`）を公開し、GitHub のリリースからの `add`、名前での `add`、`search`、`update` を、実際の GitHub を相手に確かめた。
 
-- サンプルのプラグイン [q0tzly/nib-plugin-example](https://github.com/q0tzly/nib-plugin-example)。Go で書き、タグを push すると `.nib.tar.gz` をリリースに置く
-- 一覧のリポジトリ [q0tzly/nib-plugins](https://github.com/q0tzly/nib-plugins)（`plugins.toml`）
+- サンプルのプラグイン [nib-editor/plugin-example](https://github.com/nib-editor/plugin-example)。Go で書き、タグを push すると `.nib.tar.gz` をリリースに置く
+- 一覧のリポジトリ [nib-editor/plugins](https://github.com/nib-editor/plugins)（`plugins.toml`）
 - `nib plugin search [語]` と、名前での `nib plugin add`（[plugin-install.md](plugin-install.md) の「名前で探す」）
 
 確かめ方: `nib plugin add wordcount` で入れたプラグインが nib で動き、記録の取得元がリポジトリになっていること。

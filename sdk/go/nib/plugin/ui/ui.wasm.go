@@ -3,7 +3,7 @@
 package ui
 
 import (
-	"github.com/q0tzly/nib/sdk/go/nib/plugin/types"
+	"github.com/nib-editor/nib/sdk/go/nib/plugin/types"
 )
 
 // This file contains wasmimport and wasmexport declarations for "nib:plugin@0.4.0".

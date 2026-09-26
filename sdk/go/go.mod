@@ -1,4 +1,4 @@
-module github.com/q0tzly/nib/sdk/go
+module github.com/nib-editor/nib/sdk/go
 
 go 1.24
 

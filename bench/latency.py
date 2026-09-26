@@ -1,6 +1,6 @@
 """Measure editor-internal key latency through a pty (no terminal emulator involved).
 
-Usage: python3 bench/latency.py FILE [--startup] [--idle SECONDS] [vim] [hx] [nib]
+Usage: python3 bench/latency.py FILE [--startup] [--idle SECONDS] [vim] [nvim] [hx] [emacs] [nib]
 
 --startup measures only startup, for editors that cannot edit yet.
 --idle also measures CPU use and wakeups while the editor waits for keys.
@@ -22,12 +22,13 @@ REPLIES = {
 }
 
 
-def spawn(argv):
+def spawn(argv, env=None):
     pid, fd = pty.fork()
     if pid == 0:
         # Set the size before exec, so the editor never sees a 0x0 terminal.
         fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
         os.environ["TERM"] = "xterm-256color"
+        os.environ.update(env or {})
         os.execvp(argv[0], argv)
     return pid, fd
 
@@ -47,7 +48,13 @@ def read_burst(fd, first_timeout, silence):
         r, _, _ = select.select([fd], [], [], timeout)
         if not r:
             return t_first, t_last
-        data = os.read(fd, 65536)
+        try:
+            data = os.read(fd, 65536)
+        except OSError:
+            data = b""
+        if not data:
+            # The editor exited.
+            return t_first, t_last
         now = time.perf_counter() - t0
         answer(fd, data)
         if t_first is None:
@@ -83,12 +90,13 @@ def pct(xs, p):
     return xs[min(len(xs) - 1, int(len(xs) * p))]
 
 
-def run(name, argv, enter_insert, startup_only, idle, n=300):
+def run(editor, startup_only, idle, n=300):
+    name, argv, keys, env = editor.name, editor.argv, editor.keys, editor.env
     # startup: spawn -> the output settles, including redraws that color
     # the screen after the first frame
     starts, memory = [], []
     for _ in range(10):
-        pid, fd = spawn(argv)
+        pid, fd = spawn(argv, env)
         _, last = read_burst(fd, 5.0, 0.3)
         starts.append(last)
         if u := usage(pid):
@@ -102,7 +110,7 @@ def run(name, argv, enter_insert, startup_only, idle, n=300):
     if startup_only:
         return
 
-    pid, fd = spawn(argv)
+    pid, fd = spawn(argv, env)
     read_burst(fd, 5.0, 0.5)
     if idle and (before := usage(pid)):
         # Nothing to read while idle, unless the editor draws on its own.
@@ -112,15 +120,15 @@ def run(name, argv, enter_insert, startup_only, idle, n=300):
         print(f"  idle {idle:g} s: CPU {cpu:.3f} % of a core, {(after[1] - before[1]) / idle:.1f} wakeups/s")
     results = {}
     for label, prep, key in [
-        ("insert 'a'", enter_insert, b"a"),
-        ("scroll C-d", b"\x1b", b"\x04"),
+        ("insert 'a'", keys.insert, b"a"),
+        ("scroll", keys.normal, keys.half_page),
     ]:
         os.write(fd, prep)
         read_burst(fd, 0.5, 0.2)
         firsts, lasts = [], []
         for i in range(n):
-            if label.startswith("scroll") and i % 40 == 0:
-                os.write(fd, b"gg"); read_burst(fd, 0.5, 0.1)
+            if label == "scroll" and i % 40 == 0:
+                os.write(fd, keys.top); read_burst(fd, 0.5, 0.1)
             os.write(fd, key)
             f, l = read_burst(fd, 1.0, 0.015)
             if f is not None:
@@ -139,15 +147,40 @@ def run(name, argv, enter_insert, startup_only, idle, n=300):
               f" | frame done: median {statistics.median(lasts):.2f} ms  p99 {pct(lasts, .99):.2f} ms  (n={len(firsts)})")
 
 
-HX_CONFIG = b"[editor.lsp]\nenable = false\n"
+class Keys:
+    """The keys that do the same thing in each editor."""
+    def __init__(self, insert=b"i", normal=b"\x1b", half_page=b"\x04", top=b"gg"):
+        self.insert, self.normal, self.half_page, self.top = insert, normal, half_page, top
 
-EDITORS = {
-    "vim": lambda f, tmp: ("vim --clean", ["vim", "--clean", f]),
-    "hx": lambda f, tmp: ("helix (lsp off)", ["hx", "-c", tmp, f]),
-    "nib": lambda f, tmp: ("nib", [NIB, f]),
-}
+
+class Editor:
+    def __init__(self, name, argv, keys=Keys(), env=None):
+        self.name, self.argv, self.keys, self.env = name, argv, keys, env
+
+
+# Emacs has no modes; C-v scrolls a whole screen and M-< goes to the top.
+EMACS_KEYS = Keys(insert=b"", normal=b"\x07", half_page=b"\x16", top=b"\x1b<")
 
 NIB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target", "release", "nib")
+
+
+def editors(path, config):
+    """Each editor without user settings, and with LSP off."""
+    hx_config = os.path.join(config, "helix.toml")
+    with open(hx_config, "w") as f:
+        f.write("[editor.lsp]\nenable = false\n")
+    os.makedirs(os.path.join(config, "nib", "plugins"), exist_ok=True)
+    with open(os.path.join(config, "nib", "plugins", "lsp.toml"), "w") as f:
+        f.write("enabled = false\n")
+    return {
+        # No swap file: runs end with SIGKILL, and a swap file left behind
+        # makes the next run stop at a prompt.
+        "vim": Editor("vim --clean", ["vim", "--clean", "-n", path]),
+        "nvim": Editor("nvim --clean", ["nvim", "--clean", "-n", path]),
+        "hx": Editor("helix (lsp off)", ["hx", "-c", hx_config, path]),
+        "emacs": Editor("emacs -nw -Q", ["emacs", "-nw", "-Q", path], EMACS_KEYS),
+        "nib": Editor("nib (lsp off)", [NIB, path], env={"XDG_CONFIG_HOME": config}),
+    }
 
 
 if __name__ == "__main__":
@@ -161,9 +194,8 @@ if __name__ == "__main__":
         i = args.index("--idle")
         idle = float(args[i + 1])
         del args[i:i + 2]
-    path, which = sys.argv[1], [a for a in args if a != "--startup"] or list(EDITORS)
-    with tempfile.NamedTemporaryFile(suffix=".toml") as cfg:
-        cfg.write(HX_CONFIG); cfg.flush()
-        for e in which:
-            name, argv = EDITORS[e](path, cfg.name)
-            run(name, argv, b"i", startup_only, idle)
+    path, which = sys.argv[1], [a for a in args if a != "--startup"]
+    with tempfile.TemporaryDirectory() as config:
+        all_editors = editors(path, config)
+        for e in which or list(all_editors):
+            run(all_editors[e], startup_only, idle)

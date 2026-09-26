@@ -127,7 +127,7 @@ impl Editor {
 
     fn render_text(&self, grid: &mut Grid, rows: u16) -> Option<Cursor> {
         let width = u32::from(grid.width());
-        let tab_width = u32::from(self.settings().tab_width);
+        let tab_width = u32::from(self.state().tab_width(self.view().buffer));
         let text = self.buffer().text();
         let view = self.view();
         let ranges = view.selection.ranges();
@@ -327,7 +327,7 @@ impl Editor {
         // On a char boundary, in case the text changed under the offset.
         let offset = text.char_to_byte(text.byte_to_char(offset.min(text.len_bytes())));
         let row = text.byte_to_line(offset).checked_sub(view.top_line)?;
-        let column = layout::column_of(text, offset, self.settings().tab_width)
+        let column = layout::column_of(text, offset, self.state().tab_width(view.buffer))
             .checked_sub(view.left_col)?;
         (row < rows as usize && column < u32::from(width)).then_some((column as u16, row as u16))
     }

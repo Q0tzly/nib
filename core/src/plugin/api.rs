@@ -317,7 +317,7 @@ impl editor::HostView for PluginData {
         column: Option<u32>,
     ) -> HostResult<Result<(u64, u32), editor::Error>> {
         let state = self.view_state(&view)?;
-        let tab_width = state.settings.tab_width;
+        let tab_width = state.tab_width(state.view.buffer);
         let text = state.buffers[state.view.buffer].text();
         wit_result(
             pos(at)
@@ -670,7 +670,30 @@ pub(crate) fn wit_event(event: &Event) -> events::Event {
 
 impl settings::Host for PluginData {
     fn get(&mut self, key: String) -> HostResult<Option<String>> {
-        Ok(self.state()?.settings.get_json(&key))
+        let state = self.state()?;
+        Ok(state.setting_json(state.view.buffer, &key))
+    }
+
+    fn get_for(
+        &mut self,
+        buffer: Resource<BufferHandle>,
+        key: String,
+    ) -> HostResult<Option<String>> {
+        let (index, _) = self.buffer_range(&buffer, 0, 0)?;
+        Ok(self.state()?.setting_json(index, &key))
+    }
+
+    fn set_for(
+        &mut self,
+        buffer: Resource<BufferHandle>,
+        key: String,
+        value: Option<String>,
+    ) -> HostResult<Result<(), String>> {
+        let (index, _) = self.buffer_range(&buffer, 0, 0)?;
+        let owner = self.plugin;
+        Ok(self
+            .state()?
+            .set_setting(index, owner, &key, value.as_deref()))
     }
 }
 

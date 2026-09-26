@@ -7,6 +7,7 @@ use ropey::Rope;
 use crate::Error;
 use crate::change::Assoc;
 use crate::change::{ChangeSet, Edit};
+use crate::config::Indent;
 use crate::events::{TextChange, text_changes};
 use crate::grapheme;
 use crate::history::{History, UndoMode};
@@ -20,6 +21,13 @@ use crate::ui::{Decoration, Note};
 pub enum LineEnding {
     Lf,
     Crlf,
+}
+
+/// Editing settings a plugin set for one buffer, over config.toml's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Overrides {
+    pub tab_width: Option<(PluginId, u16)>,
+    pub indent: Option<(PluginId, Indent)>,
 }
 
 /// What a change did to a buffer.
@@ -45,6 +53,8 @@ pub struct Buffer {
     pub(crate) decorations: Vec<Decoration>,
     /// Sorted by position.
     pub(crate) notes: Vec<Note>,
+    /// Settings plugins changed for this buffer alone, with who changed them.
+    pub(crate) overrides: Overrides,
     /// Changes not yet turned into events: the version after each, and
     /// what it did.
     pub(crate) change_log: Vec<(u64, Vec<TextChange>)>,
@@ -78,6 +88,7 @@ impl Buffer {
             syntax: None,
             decorations: Vec::new(),
             notes: Vec::new(),
+            overrides: Overrides::default(),
             change_log: Vec::new(),
         }
     }
@@ -336,6 +347,9 @@ impl Buffer {
     pub(crate) fn remove_decorations(&mut self, owner: PluginId) {
         self.decorations.retain(|d| d.owner != owner);
         self.notes.retain(|n| n.owner != owner);
+        let overrides = &mut self.overrides;
+        overrides.tab_width = overrides.tab_width.filter(|(o, _)| *o != owner);
+        overrides.indent = overrides.indent.filter(|(o, _)| *o != owner);
     }
 
     /// Replaces the notes `owner` has in `namespace`.

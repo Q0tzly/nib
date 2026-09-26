@@ -7,7 +7,7 @@ use tree_sitter::Tree;
 
 use crate::Error;
 use crate::buffer::Buffer;
-use crate::config::{Config, PluginConfig, Settings};
+use crate::config::{Config, Indent, PluginConfig, Settings};
 use crate::events::{Command, Event, Timer};
 use crate::input::{KeyCode, KeyEvent};
 use crate::layout;
@@ -265,6 +265,69 @@ impl State {
             _ => return Err(format!("no command named {name}")),
         }
         Ok("null".into())
+    }
+
+    /// The tab width of buffer `index`.
+    pub fn tab_width(&self, index: usize) -> u16 {
+        self.buffers[index]
+            .overrides
+            .tab_width
+            .map_or(self.settings.tab_width, |(_, width)| width)
+    }
+
+    /// An editing setting of buffer `index` as JSON.
+    pub fn setting_json(&self, index: usize, key: &str) -> Option<String> {
+        let overrides = &self.buffers[index].overrides;
+        match key {
+            "tab-width" => Some(self.tab_width(index).to_string()),
+            "indent" => {
+                let indent = overrides
+                    .indent
+                    .map_or(self.settings.indent, |(_, indent)| indent);
+                Some(indent.to_json().to_string())
+            }
+            _ => self.settings.get_json(key),
+        }
+    }
+
+    /// Sets an editing setting for buffer `index` alone, or with `None`
+    /// goes back to config.toml's value.
+    pub fn set_setting(
+        &mut self,
+        index: usize,
+        owner: PluginId,
+        key: &str,
+        value: Option<&str>,
+    ) -> Result<(), String> {
+        let value: Option<serde_json::Value> = value
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|err| format!("{key}: {err}"))?;
+        let overrides = &mut self.buffers[index].overrides;
+        match key {
+            "tab-width" => {
+                overrides.tab_width = value
+                    .map(|v| {
+                        let width = v
+                            .as_u64()
+                            .filter(|w| (1..=16).contains(w))
+                            .ok_or("tab-width must be 1 to 16")?;
+                        Ok::<_, String>((owner, width as u16))
+                    })
+                    .transpose()?;
+            }
+            "indent" => {
+                overrides.indent = value
+                    .map(|v| {
+                        let indent = Indent::from_json(&v)
+                            .ok_or("indent must be \"tab\" or 1 to 16 spaces")?;
+                        Ok::<_, String>((owner, indent))
+                    })
+                    .transpose()?;
+            }
+            _ => return Err(format!("{key} cannot be set per buffer")),
+        }
+        Ok(())
     }
 
     /// Removes everything `plugin` put into the editor.
@@ -541,7 +604,7 @@ impl Editor {
         let text = state.buffers[state.view.buffer].text();
         let cursor = state.view.cursor(text);
         let line = text.byte_to_line(cursor);
-        let column = layout::column_of(text, cursor, state.settings.tab_width);
+        let column = layout::column_of(text, cursor, state.tab_width(state.view.buffer));
         let width = u32::from(state.width.max(1));
         let margin = (state.settings.scroll_margin as usize).min((rows - 1) / 2);
         let view = &mut state.view;

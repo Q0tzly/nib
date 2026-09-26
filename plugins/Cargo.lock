@@ -96,7 +96,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "nib-plugin"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "wit-bindgen",
 ]
@@ -104,6 +104,14 @@ dependencies = [
 [[package]]
 name = "nib-plugin-helix"
 version = "0.1.9"
+dependencies = [
+ "nib-plugin",
+ "serde_json",
+]
+
+[[package]]
+name = "nib-plugin-indent"
+version = "0.1.0"
 dependencies = [
  "nib-plugin",
  "serde_json",

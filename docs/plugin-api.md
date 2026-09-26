@@ -336,6 +336,31 @@ set-decorations: func(buf: borrow<buffer>, namespace: string, decorations: list<
 - プラグイン専用のデータディレクトリは、使うプラグインが出てきたときに作る。
 - 大量のファイルを列挙するような重い I/O は、コアが非同期の仕事として提供し、結果をイベントで返す。WASI のファイル API は同期的なので、プラグインが直接やるとメインスレッドが止まる。
 
+## 設定
+
+```wit
+interface settings {
+    /// 表示中のバッファでの値（JSON）: "tab-width"、"indent"（空白の数か "tab"）、"scroll-margin"
+    get: func(key: string) -> option<string>;
+    /// buf での値
+    get-for: func(buf: borrow<buffer>, key: string) -> option<string>;
+    /// buf でだけ値を変える。none で元に戻す
+    set-for: func(buf: borrow<buffer>, key: string, value: option<string>) -> result<_, string>;
+}
+```
+
+- 値は、config.toml の `[core]` の値を、プラグインがバッファ単位で上書きしたもの（[architecture.md](architecture.md) の「config.toml」）。
+- バッファ単位で変えられるのは `tab-width` と `indent` だけ。`scroll-margin` は画面の設定なので、バッファには持たせない。安全装置（予約キー、プラグインの上限）は、どの形でもプラグインから変えられない。
+- 同じバッファの同じキーを複数のプラグインが変えたら、あとから変えたほうが勝つ。変えたプラグインが止まると、その上書きは消える。
+- 言語ごとの既定値は、標準プラグイン `indent` が受け持つ。バッファが開いたら言語を調べ、`set-for` で上書きする。既定では Go をタブ、YAML と JSON を空白 2 つにする。利用者は `plugins/indent.toml` で変えられる。
+
+```toml
+# ~/.config/nib/plugins/indent.toml
+[settings.languages.python]
+indent = 4
+tab-width = 8
+```
+
 ## 外部プロセス
 
 ```wit

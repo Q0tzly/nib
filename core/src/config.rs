@@ -15,8 +15,8 @@ use crate::ui::Theme;
 /// Settings of the core.
 ///
 /// Editing behavior (`tab_width`, `indent`, `scroll_margin`) is for plugins
-/// to read and, later, to override per buffer. Safety settings (`menu_key`,
-/// and the plugin limits) are for the user alone.
+/// to read, and the first two to override per buffer. Safety settings
+/// (`menu_key`, and the plugin limits) are for the user alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     pub tab_width: u16,
@@ -38,6 +38,24 @@ pub enum Indent {
     Spaces(u8),
 }
 
+impl Indent {
+    pub(crate) fn to_json(self) -> serde_json::Value {
+        match self {
+            Indent::Tab => serde_json::json!("tab"),
+            Indent::Spaces(n) => serde_json::json!(n),
+        }
+    }
+
+    /// "tab", or 1 to 16 spaces.
+    pub(crate) fn from_json(value: &serde_json::Value) -> Option<Self> {
+        if value == "tab" {
+            return Some(Indent::Tab);
+        }
+        let n = value.as_u64().filter(|n| (1..=16).contains(n))?;
+        Some(Indent::Spaces(n as u8))
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -57,10 +75,7 @@ impl Settings {
     pub fn get_json(&self, key: &str) -> Option<String> {
         let value = match key {
             "tab-width" => serde_json::json!(self.tab_width),
-            "indent" => match self.indent {
-                Indent::Tab => serde_json::json!("tab"),
-                Indent::Spaces(n) => serde_json::json!(n),
-            },
+            "indent" => self.indent.to_json(),
             "scroll-margin" => serde_json::json!(self.scroll_margin),
             _ => return None,
         };

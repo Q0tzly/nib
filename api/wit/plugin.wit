@@ -300,9 +300,17 @@ interface ui {
 }
 
 interface settings {
-    /// An editing setting of the core as JSON: "tab-width", "indent" (a
-    /// number of spaces or "tab"), or "scroll-margin".
+    use editor.{buffer};
+
+    /// An editing setting as JSON, for the shown buffer: "tab-width",
+    /// "indent" (a number of spaces or "tab"), or "scroll-margin".
     get: func(key: string) -> option<string>;
+    /// An editing setting for `buf`.
+    get-for: func(buf: borrow<buffer>, key: string) -> option<string>;
+    /// Sets "tab-width" or "indent" for `buf` alone, over config.toml's
+    /// value; `none` goes back to it. The last plugin to set a key wins, and
+    /// what a plugin set goes away when it stops.
+    set-for: func(buf: borrow<buffer>, key: string, value: option<string>) -> result<_, string>;
 }
 
 /// The syntax trees the core keeps for buffers with a language. Every

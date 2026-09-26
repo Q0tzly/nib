@@ -8,7 +8,8 @@ use std::{env, fs};
 /// Built in, in load order: the keymap first, so it is at the bottom of the
 /// input stack.
 const STANDARD_PLUGINS: &[&str] = &[
-    "helix", "picker", "lsp", "bash", "go", "json", "markdown", "python", "rust", "toml", "yaml",
+    "helix", "picker", "lsp", "indent", "bash", "go", "json", "markdown", "python", "rust", "toml",
+    "yaml",
 ];
 
 fn main() {

@@ -8,16 +8,23 @@ use nib_core::{Color, Cursor, CursorShape, Grid, Style, Symbol};
 
 /// Positions of cells in `next` that differ from `prev`. A double-width
 /// grapheme is reported once, at its left half. Every cell is reported
-/// when the size changed.
+/// when the size changed. Rows are compared whole first: most of them are
+/// the same from one frame to the next.
 pub fn changed_cells(prev: &Grid, next: &Grid) -> Vec<(u16, u16)> {
     let resized = prev.width() != next.width() || prev.height() != next.height();
     let mut changed = Vec::new();
     for y in 0..next.height() {
-        for x in 0..next.width() {
-            if !resized && prev.cell(x, y) == next.cell(x, y) {
+        let row = next.row(y);
+        let old = (!resized).then(|| prev.row(y));
+        if old == Some(row) {
+            continue;
+        }
+        for (x, cell) in row.iter().enumerate() {
+            if old.is_some_and(|old| old[x] == *cell) {
                 continue;
             }
-            let head = match next.cell(x, y).symbol {
+            let x = x as u16;
+            let head = match cell.symbol {
                 Symbol::Continuation => x - 1,
                 _ => x,
             };
@@ -29,16 +36,18 @@ pub fn changed_cells(prev: &Grid, next: &Grid) -> Vec<(u16, u16)> {
     changed
 }
 
+/// Writes the `changed` cells of `next`, from `changed_cells`, and puts the
+/// cursor.
 pub fn draw(
     out: &mut impl Write,
-    prev: &Grid,
     next: &Grid,
+    changed: &[(u16, u16)],
     cursor: Option<Cursor>,
 ) -> io::Result<()> {
     queue!(out, terminal::BeginSynchronizedUpdate, cursor::Hide)?;
     let mut style = None;
     let mut pos = None;
-    for (x, y) in changed_cells(prev, next) {
+    for &(x, y) in changed {
         let cell = next.cell(x, y);
         if pos != Some((x, y)) {
             queue!(out, cursor::MoveTo(x, y))?;
@@ -150,7 +159,8 @@ mod tests {
             y: 0,
             shape: CursorShape::Bar,
         };
-        draw(&mut out, &grid(4, "abcd"), &grid(4, "abXY"), Some(cursor)).unwrap();
+        let (prev, next) = (grid(4, "abcd"), grid(4, "abXY"));
+        draw(&mut out, &next, &changed_cells(&prev, &next), Some(cursor)).unwrap();
         let out = String::from_utf8(out).unwrap();
         // One move to column 3 (1-based), then both cells without moving again.
         assert!(out.contains("\x1b[1;3H"), "{out:?}");

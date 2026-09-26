@@ -104,6 +104,12 @@ impl Grid {
         &self.cells[self.index(x, y)]
     }
 
+    /// The cells of row `y`, left to right.
+    pub fn row(&self, y: u16) -> &[Cell] {
+        let start = self.index(0, y);
+        &self.cells[start..start + self.width as usize]
+    }
+
     /// Resizes the grid and resets every cell.
     pub fn reset(&mut self, width: u16, height: u16) {
         self.width = width;

@@ -31,9 +31,10 @@ pub fn run(editor: &mut Editor) -> io::Result<()> {
     let mut out = Vec::new();
     loop {
         let cursor = editor.render(&mut next);
-        if next != prev || cursor != prev_cursor {
+        let changed = draw::changed_cells(&prev, &next);
+        if !changed.is_empty() || cursor != prev_cursor {
             out.clear();
-            draw::draw(&mut out, &prev, &next, cursor)?;
+            draw::draw(&mut out, &next, &changed, cursor)?;
             stdout.write_all(&out)?;
             stdout.flush()?;
             std::mem::swap(&mut prev, &mut next);
